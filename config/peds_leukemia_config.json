@@ -1,0 +1,139 @@
+{
+  "reference_file": "T2T-CHM13v2.0_reference.json",
+
+  "genes": {
+    "cnv": {
+      "focal_genes": ["RUNX1", "CDKN2A", "CDKN2B", "ERG", "PAX5", "KMT2A", "IKZF1"],
+      "exclude_from_baseline": ["RUNX1", "CDKN2A", "CDKN2B", "IKZF1", "ERG", "PAX5", "KMT2A", "DUX4"],
+      "deletion_genes": ["ERG", "IKZF1", "PAX5", "KMT2A"],
+      "duplication_genes": ["PAX5", "KMT2A"]
+    },
+    "itd": {
+      "FLT3": {
+        "chrom": "NC_060937.1",
+        "start": 27256261,
+        "end": 27256588,
+        "min_length": 3,
+        "min_frequency": 0.05
+      },
+      "UBTF": {
+        "chrom": "NC_060941.1",
+        "start": 45063895,
+        "end": 45064050,
+        "min_length": 3,
+        "min_frequency": 0.05
+      },
+      "NPM1": {
+        "chrom": "NC_060929.1",
+        "start": 171931630,
+        "end": 171931750,
+        "min_length": 4,
+        "min_frequency": 0.05
+      }
+    },
+    "snv": {
+      "pharmacogenomics": ["TPMT", "NUDT15"],
+      "pathogenic": ["PAX5", "IKZF1"],
+      "transcripts": {
+        "TPMT": {
+          "transcript": "rna-NM_001346817.1",
+          "variants": {
+            "*5": [146],
+            "*2": [238],
+            "*12": [374],
+            "*3A": [460, 719],
+            "*3B": [460],
+            "*4": [626],
+            "*8": [644],
+            "*3C": [719]
+          }
+        },
+        "NUDT15": {
+          "variants": {
+            "*5": [52],
+            "*2 or *3": [415],
+            "*4": [416]
+          }
+        },
+        "PAX5": {
+          "transcript": "rna-NM_016734.3",
+          "variants": {
+            "p.Pro80Arg": [239]
+          }
+        },
+        "IKZF1": {
+          "transcript": "rna-NM_006060.6",
+          "variants": {
+            "p.Asn159Tyr": [475]
+          }
+        }
+      }
+    },
+    "fusions": {
+      "special_margins": {
+        "CRLF2": 25000,
+        "TAL1": 10000,
+        "STIL": 10000
+      },
+      "skip_self_fusions": ["DUX4", "TCR"],
+      "bypass_breakpoint_filter": ["DUX4"],
+      "blacklist_pairs": [
+        ["CYP2C19", "CYP2C9"],
+        ["BCR", "IGL"],
+        ["IGK", "IGL"],
+        ["IGK", "KMT2C"]
+      ],
+      "one_sided_genes": [
+        "ABL1", "ABL2", "BCL11B", "CREBBP", "EP300", "ERG", "ETV6",
+        "FGFR1", "FLI1", "IL3", "JAK2", "KAT6A", "KMT2A", "MECOM", "MEF2B",
+        "NPM1", "NSD1", "NUP214", "NUP98", "PAX5", "PDGFRB", "PHF6", "RARA",
+        "RUNX1", "SET", "TCF3", "ZNF384"
+      ],
+      "one_sided_partners": {
+        "MECOM": [
+          "GATA2", "ETV6", "RUNX1", "H2AFY", "RPN1", "EYA3", "RPL22"
+        ]
+      },
+      "spike_in": {
+        "gene1": "PBX1",
+        "gene2": "ETV6"
+      }
+    }
+  },
+
+  "thresholds": {
+    "fusions": {
+      "default_margin": 5000,
+      "min_anchor": 500,
+      "min_supporting_reads": 3,
+      "min_breakpoint_reads": 3,
+      "one_sided": {
+        "min_fraction": 0.1
+      }
+    },
+    "snv": {
+      "min_coverage": 5.0,
+      "min_allele_freq": 0.3,
+      "homozygosity_vaf": 0.8,
+      "phasing_ratio": 10
+    },
+    "cnv": {
+      "gene_margin": 50000,
+      "min_supporting_reads": 3,
+      "breakpoint_margin": 50,
+      "min_anchor": 500
+    },
+    "maf": {
+      "min_depth": 20
+    },
+    "coverage": {
+      "bin_size": 1000000
+    },
+    "karyotype": {
+      "spread_warning": 0.08,
+      "level_tolerance": 0.3,
+      "maf_peak_diploid": 0.4,
+      "min_maf_sites": 50
+    }
+  }
+}

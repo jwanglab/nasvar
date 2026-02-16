@@ -186,13 +186,13 @@ The tool scans each directory for `{sample}.result.json` and produces a tab-sepa
 
 ### Pipeline Config (`pipeline.json`)
 
-[Example](https://github.com/jwanglab/nasvar/blob/main/peds_leukemia_config.json)
+[Example](https://github.com/jwanglab/nasvar/blob/main/config/peds_leukemia_config.json)
 
 All threshold fields have sensible defaults and can be omitted.
 
 ### Reference Config (`reference.json`)
 
-[T2T/CHM13v2.0](https://github.com/jwanglab/nasvar/blob/main/T2T-CHM13v2.0_reference.json)
+[T2T/CHM13v2.0](https://github.com/jwanglab/nasvar/blob/main/config/T2T-CHM13v2.0_reference.json)
 
 Provide centromere coordinates for all chromosomes (chr1-chr22, chrX, chrY).
 
