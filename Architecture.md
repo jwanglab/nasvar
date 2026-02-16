@@ -185,7 +185,7 @@ Breakpoint Consensus (optional, requires indexed BAM)
        │
        ▼
 Karyotype Analysis
-  ├── Two-pass GC bias correction (linear regression on majority-ploidy bins)
+  ├── Two-pass GC bias correction (linear or LOESS, configurable via --gc-correction)
   ├── MAF-based ploidy estimation
   ├── SVG plots ({prefix}.karyotype*.svg, {prefix}.gc_vs_coverage*.svg)
   └── KaryotypeOutput + {prefix}.coverage.gc_adjusted.tsv
@@ -226,18 +226,40 @@ The entry point is `call_karyotype_gc_corrected`, which runs the full two-pass p
 #### Two-Pass Architecture
 
 - **Pass 1** (`call_karyotype` on raw coverage): Produces an initial karyotype estimate. This is needed to identify which chromosome arms are at majority ploidy (typically diploid), so the GC correction can be trained on segments with consistent copy number.
-- **GC bias correction** (`gc_correct_coverage`): Fits a linear model on majority-ploidy autosomal bins, then adjusts all bins. Outputs `{prefix}.coverage.gc_adjusted.tsv`.
+- **GC bias correction** (`gc_correct_coverage`): Fits a regression model on majority-ploidy autosomal bins, then adjusts all bins. Outputs `{prefix}.coverage.gc_adjusted.tsv`. The correction method is controlled by `--gc-correction` (default: `linear`).
 - **Pass 2** (`call_karyotype` on corrected coverage): Re-runs the full karyotype inference on GC-adjusted coverage for the final result.
+
+When `--gc-correction none` is specified, GC correction is skipped entirely and Pass 1 results are returned directly.
 
 #### GC Bias Correction
 
-The correction uses simple linear regression, not LOESS:
+The correction method is configurable via the `--gc-correction` CLI flag (`GcCorrectionMethod` enum):
+
+| Value | Method | Description |
+|-------|--------|-------------|
+| `linear` | Linear regression (default) | Fits `predicted = m * gc + b` on majority-ploidy bins |
+| `loess` | LOESS local regression | Non-parametric smooth fit; better for non-linear GC bias |
+| `none` | Disabled | Skips GC correction entirely |
+
+**Common steps (both methods):**
 
 1. Identify the majority autosomal ploidy from Pass 1 (most common CN among autosomal arms)
 2. Collect `(gc_content, coverage)` pairs from bins belonging to majority-ploidy segments only (excludes sex chromosomes and non-majority arms to avoid confounding)
-3. Fit linear regression: `predicted = m * gc + b`
-4. Correct each bin: `corrected = observed * reference / predicted`, where `reference = m * 0.41 + b` (normalizing to a GC content of 41%)
+3. Fit the selected regression model on those pairs
+4. Correct each bin: `corrected = observed * reference / predicted`, where `reference` is the model's predicted coverage at GC = 0.41 and `predicted` is the model's prediction at the bin's actual GC content. This normalizes all bins to the expected coverage at 41% GC.
 5. Clamp negative values to 0
+
+**Linear regression**: Fits a single slope and intercept via ordinary least squares. The fit curve is a straight line. This is adequate when GC bias is approximately linear across the 0.3-0.7 GC range.
+
+**LOESS (Locally Estimated Scatterplot Smoothing)**: Fits a smooth, non-parametric curve that can capture non-linear GC bias patterns. Implementation details:
+
+- **Tricube kernel**: Neighbor weights use `w(u) = (1 - |u|^3)^3` where `u = distance / max_distance`
+- **Bandwidth**: 0.3 (30% of data points used as neighbors for each prediction)
+- **Local model**: Weighted linear regression at each query point using the k nearest neighbors
+- **Curve generation**: 50 evenly-spaced points from GC 0.3 to 0.7 are evaluated for plotting
+- **Reference point**: Same GC = 0.41 normalization as linear, evaluated via `loess_predict_single`
+
+The LOESS approach is recommended when GC bias appears curved rather than linear in the `gc_vs_coverage` diagnostic plots.
 
 #### Level Finding (`find_levels`)
 
@@ -293,7 +315,7 @@ Sum autosomal copies across all arms, determine sex chromosomes, format ISCN mod
 
 #### Visualization
 
-Generate SVG plots for pre/post GC-correction karyotype views, combined karyotype + BAF plot, and GC bias diagnostics (`src/karyotype/plot.rs` using `src/plotting/`)
+Generate SVG plots for pre/post GC-correction karyotype views, combined karyotype + BAF plot, and GC bias diagnostics (`src/karyotype/plot.rs` using `src/plotting/`). The GC vs coverage plots (`plot_gc_vs_coverage`) accept a fitted curve as a series of `(gc, predicted)` points -- 2 points for linear (rendered as a straight line) or ~50 points for LOESS (rendered as a smooth curve). The plot label automatically indicates the fit type.
 
 ### Fusion Detection (Two-Stage with Ambiguity Filtering)
 
