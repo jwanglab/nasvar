@@ -1,0 +1,32 @@
+[package]
+name = "nasvar"
+version = "1.0.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+log = "0.4"
+env_logger = "0.11"
+indexmap = "2.0"
+noodles = { version = "0.104", features = ["bam", "cram", "sam", "fasta", "bgzf", "core"] }
+bitvec = "1"
+tikv-jemallocator = "0.6"
+schemars = "1"
+jsonschema = "0.28"
+
+# CRAM processing is *exceptionally* slow because of architectural limitations (of the CRAM format) and implementation limtiations (in noodles)
+# we are working to patch it but for now we use the noodle main branch - beware it will be SLOW
+#[patch.crates-io]
+#noodles-cram = { path = "../ramtools/noodles-cram-patch" }
+
+[[bin]]
+name = "nasvar"
+path = "src/bin/nasvar.rs"
+
+[[bin]]
+name = "aggregate"
+path = "src/bin/aggregate.rs"
