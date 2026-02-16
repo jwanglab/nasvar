@@ -1,4 +1,4 @@
-# <img src="static/nasvar_logo.png" alt="NASVar logo" width="200px"/> nasvar = **N**anopore **A**daptive **S**ample **Var**iants
+# <img src="static/nasvar_logo.png" alt="NASVar logo" width="50px"/> nasvar = **N**anopore **A**daptive **S**ample **Var**iants
 
 A variant calling pipeline for long-read sequencing with adaptive sampling, with a focus on human cancer genomics (tumor only). nasvar detects SNVs, CNVs, gene fusions, internal tandem duplications (ITDs), and infers karyotypes from aligned BAM or CRAM files.
 
