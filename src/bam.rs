@@ -19,7 +19,7 @@ pub enum CigarOp {
 }
 
 impl CigarOp {
-    pub fn from_u32(val: u32) -> (Self, u32) {
+    pub fn from_u32(val: u32) -> std::io::Result<(Self, u32)> {
         let op = val & 0xF;
         let len = val >> 4;
         let kind = match op {
@@ -33,9 +33,12 @@ impl CigarOp {
             7 => CigarOp::Equal,
             8 => CigarOp::Diff,
             9 => CigarOp::Back,
-            _ => CigarOp::Match, // Default/Error?
+            _ => return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid CIGAR operation code: {op}"),
+            )),
         };
-        (kind, len)
+        Ok((kind, len))
     }
 }
 
@@ -59,7 +62,7 @@ pub fn fix_sam_coords(ts: u32, te: u32, cigar: &[u32], flags: u16) -> std::io::R
     let mut seen_non_clip = false;
 
     for val in cigar {
-        let (op, len) = CigarOp::from_u32(*val);
+        let (op, len) = CigarOp::from_u32(*val)?;
         match op {
             CigarOp::Match | CigarOp::Equal | CigarOp::Diff | CigarOp::Ins => {
                 qlen += len;
@@ -91,7 +94,7 @@ pub fn fix_sam_coords(ts: u32, te: u32, cigar: &[u32], flags: u16) -> std::io::R
 
     // Calculate qe by summing aligned query bases (M, I, =, X)
     for val in cigar {
-        let (op, len) = CigarOp::from_u32(*val);
+        let (op, len) = CigarOp::from_u32(*val)?;
         match op {
             CigarOp::Match | CigarOp::Equal | CigarOp::Diff | CigarOp::Ins => {
                 qe += len;
@@ -129,19 +132,29 @@ mod tests {
     #[test]
     fn test_cigar_op_decode() {
         // Match (0) with length 10
-        let (op, len) = CigarOp::from_u32(encode_cigar(0, 10));
+        let (op, len) = CigarOp::from_u32(encode_cigar(0, 10)).unwrap();
         assert_eq!(op, CigarOp::Match);
         assert_eq!(len, 10);
 
         // Insertion (1) with length 5
-        let (op, len) = CigarOp::from_u32(encode_cigar(1, 5));
+        let (op, len) = CigarOp::from_u32(encode_cigar(1, 5)).unwrap();
         assert_eq!(op, CigarOp::Ins);
         assert_eq!(len, 5);
 
         // SoftClip (4) with length 100
-        let (op, len) = CigarOp::from_u32(encode_cigar(4, 100));
+        let (op, len) = CigarOp::from_u32(encode_cigar(4, 100)).unwrap();
         assert_eq!(op, CigarOp::SoftClip);
         assert_eq!(len, 100);
+    }
+
+    #[test]
+    fn test_cigar_op_invalid() {
+        // Operation codes 10-15 are invalid per the SAM spec
+        let result = CigarOp::from_u32(encode_cigar(10, 50));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("invalid CIGAR operation code: 10"));
     }
 
     #[test]
