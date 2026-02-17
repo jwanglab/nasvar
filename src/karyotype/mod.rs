@@ -496,7 +496,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
     if all_values.is_empty() {
         return Vec::new();
     }
-    all_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    all_values.sort_by(|a, b| a.total_cmp(b));
 
     // 2. Bin width - round to integer like Python does
     let bin_size_raw = find_bin_width(&all_values);
@@ -510,7 +510,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         .filter(|v| !v.is_empty())
         .map(|vals| {
             let mut sorted = vals.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| a.total_cmp(b));
             quantile(&sorted, trim_percentile)
         })
         .fold(0.0_f64, |a, b| a.max(b));
@@ -595,7 +595,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         if sub.is_empty() {
             continue;
         }
-        sub.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sub.sort_by(|a, b| a.total_cmp(b));
         let new_peak = sub[sub.len() / 2];
 
         let new_low = new_peak - bin_size;
@@ -612,6 +612,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
     }
 
     // 6. Filter by height (> 5% of max)
+    // Safety: refined_peaks is non-empty (checked above)
     let max_height = refined_peaks.iter().map(|x| x.1).max().unwrap();
     let threshold = max_height as f64 * 0.05;
     refined_peaks.retain(|x| x.1 as f64 > threshold);
@@ -621,7 +622,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
     let mut medians: HashMap<String, f64> = HashMap::new();
     for (chr, vals) in chrom_bins {
         let mut v = vals.clone();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.sort_by(|a, b| a.total_cmp(b));
         if !v.is_empty() {
             medians.insert(chr.clone(), v[v.len() / 2]);
         }
@@ -788,7 +789,7 @@ fn find_maf_peak(levels_maf: &HashMap<usize, Vec<f64>>) -> HashMap<usize, f64> {
         peaks.sort_by(|a, b| b.1.cmp(&a.1));
         let max_height = peaks[0].1;
 
-        peaks.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap()); // desc pos
+        peaks.sort_by(|a, b| b.0.total_cmp(&a.0)); // desc pos
 
         for p in peaks {
             if p.1 as f64 > 0.5 * max_height as f64 {
@@ -889,7 +890,7 @@ pub fn call_karyotype(
     let mut medians: HashMap<String, f64> = HashMap::new();
     for (chr, vals) in &chrom_bins {
         let mut v = vals.clone();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.sort_by(|a, b| a.total_cmp(b));
         if !v.is_empty() {
             medians.insert(chr.clone(), v[v.len() / 2]);
         }
@@ -987,7 +988,7 @@ pub fn call_karyotype(
     // Collect cn_depths for adjustment logic
     let mut cn_depths: HashMap<usize, Vec<f64>> = HashMap::new();
     for (chr, &cn) in &karyotype {
-        let med = medians.get(chr).unwrap();
+        let med = medians.get(chr).unwrap_or(&0.0);
         cn_depths.entry(cn).or_default().push(*med);
     }
 
@@ -1082,7 +1083,7 @@ pub fn call_karyotype(
     // Rebuild cn_depths after X/Y adjustment
     cn_depths.clear();
     for (chr, &cn) in &karyotype {
-        let med = medians.get(chr).unwrap();
+        let med = medians.get(chr).unwrap_or(&0.0);
         cn_depths.entry(cn).or_default().push(*med);
     }
 
@@ -1167,7 +1168,7 @@ pub fn call_karyotype(
             continue;
         }
 
-        let med = medians.get(chr).unwrap();
+        let med = medians.get(chr).unwrap_or(&0.0);
         cn_depths_auto.entry(cn).or_default().push(*med);
     }
 
@@ -1210,7 +1211,7 @@ fn within_segment_spread(chrom_bins: &HashMap<String, Vec<f64>>) -> f64 {
     for k in &keys {
         let vals = &chrom_bins[*k];
         let mut v = vals.clone();
-        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v.sort_by(|a, b| a.total_cmp(b));
         if !v.is_empty() {
             let iqr = quantile(&v, 0.75) - quantile(&v, 0.25);
             seg_iqrs.push(iqr);
@@ -1223,12 +1224,12 @@ fn within_segment_spread(chrom_bins: &HashMap<String, Vec<f64>>) -> f64 {
     }
 
     // 3. IQR of IQRs
-    seg_iqrs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    seg_iqrs.sort_by(|a, b| a.total_cmp(b));
     let spread_val = quantile(&seg_iqrs, 0.75) - quantile(&seg_iqrs, 0.25);
 
     // 4. Global median
     let mut all_values: Vec<f64> = chrom_bins.values().flatten().cloned().collect();
-    all_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    all_values.sort_by(|a, b| a.total_cmp(b));
     let median = if !all_values.is_empty() {
         all_values[all_values.len() / 2]
     } else {
@@ -1258,7 +1259,7 @@ fn resolve_cn_states(
     if levels.len() >= 2 {
         sorted_levels = vec![levels[0].0, levels[1].0];
     }
-    sorted_levels.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted_levels.sort_by(|a, b| a.total_cmp(b));
 
     let v1 = sorted_levels[0];
     let v2 = if sorted_levels.len() > 1 {
@@ -1491,7 +1492,7 @@ fn loess_predict_single(xs: &[f64], ys: &[f64], query: f64, bandwidth: f64) -> f
     let mut dists: Vec<(usize, f64)> = xs.iter().enumerate()
         .map(|(i, &x)| (i, (x - query).abs()))
         .collect();
-    dists.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    dists.sort_by(|a, b| a.1.total_cmp(&b.1));
     let max_dist = dists[k - 1].1;
 
     if max_dist < 1e-12 {
