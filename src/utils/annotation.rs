@@ -19,6 +19,19 @@ impl Strand {
     }
 }
 
+/// Extract all values from a GFF attribute tag, splitting comma-separated lists.
+/// For example, `Parent=mrna1,mrna2` returns `["mrna1", "mrna2"]`.
+fn get_gff_attribute_values<'a>(info: &'a str, key: &str) -> Vec<&'a str> {
+    let prefix = format!("{}=", key);
+    for tag in info.split(';') {
+        let tag = tag.trim();
+        if let Some(stripped) = tag.strip_prefix(&prefix) {
+            return stripped.split(',').collect();
+        }
+    }
+    Vec::new()
+}
+
 /// Parsed gene annotation from a GFF file.
 pub struct GeneAnnotation {
     pub gene_id: String,
@@ -97,7 +110,7 @@ pub fn get_gene_annotation_from_reader<R: BufRead>(gene_name: &str, reader: R, t
         let info = parts[8];
 
         if (feat_type == "mRNA" || feat_type == "transcript")
-             && info.contains(&format!("Parent={}", gene_id)) {
+             && get_gff_attribute_values(info, "Parent").contains(&gene_id.as_str()) {
                  // Get ID
                  for tag in info.split(';') {
                     let tag = tag.trim();
@@ -126,24 +139,15 @@ pub fn get_gene_annotation_from_reader<R: BufRead>(gene_name: &str, reader: R, t
         let info = parts[8];
 
         if feat_type == "CDS" {
-             // Check parent
-             let mut parent = "";
-             for tag in info.split(';') {
-                 let tag = tag.trim();
-                 if let Some(stripped) = tag.strip_prefix("Parent=") {
-                     parent = stripped;
-                     break;
+             let parents = get_gff_attribute_values(info, "Parent");
+             let start: u32 = parts[3].parse().unwrap_or(0);
+             let end: u32 = parts[4].parse().unwrap_or(0);
+             if start > 0 && end > 0 {
+                 for parent in parents {
+                     if let Some(list) = transcript_cds.get_mut(parent) {
+                         list.push((start, end));
+                     }
                  }
-             }
-
-             // Handle comma-separated parents in some GFFs? Assuming single parent for now or primary.
-             // If parent in candidates
-             if let Some(list) = transcript_cds.get_mut(parent) {
-                  let start: u32 = parts[3].parse().unwrap_or(0);
-                  let end: u32 = parts[4].parse().unwrap_or(0);
-                  if start > 0 && end > 0 {
-                      list.push((start, end));
-                  }
              }
         }
     }
@@ -412,5 +416,63 @@ mod tests {
         assert_eq!(gata2.chrom, "chr1");
         assert_eq!(gata2.start, 1000);
         assert_eq!(gata2.end, 2000);
+    }
+
+    #[test]
+    fn test_gff_comma_separated_cds_parents() {
+        // CDS shared between two transcripts via comma-separated Parent
+        let gff_data = "chr1\t.\tgene\t1000\t5000\t.\t+\t.\tID=gene1;Name=SharedCDS\n\
+                        chr1\t.\tmRNA\t1000\t5000\t.\t+\t.\tID=mrna1;Parent=gene1\n\
+                        chr1\t.\tmRNA\t1000\t5000\t.\t+\t.\tID=mrna2;Parent=gene1\n\
+                        chr1\t.\tCDS\t1100\t1200\t.\t+\t0\tID=cds1;Parent=mrna1,mrna2\n\
+                        chr1\t.\tCDS\t1300\t1400\t.\t+\t1\tID=cds2;Parent=mrna1,mrna2\n";
+
+        let cursor = Cursor::new(gff_data);
+        let result = get_gene_annotation_from_reader("SharedCDS", cursor, Some("mrna1")).unwrap();
+        assert_eq!(result.mrna_id, "mrna1");
+        assert_eq!(result.cds_list.len(), 2);
+        assert_eq!(result.cds_list[0], (1100, 1200));
+
+        let cursor2 = Cursor::new(gff_data);
+        let result2 = get_gene_annotation_from_reader("SharedCDS", cursor2, Some("mrna2")).unwrap();
+        assert_eq!(result2.mrna_id, "mrna2");
+        assert_eq!(result2.cds_list.len(), 2);
+    }
+
+    #[test]
+    fn test_gff_comma_separated_mrna_parent() {
+        // mRNA with comma-separated Parent (rare but valid GFF3)
+        let gff_data = "chr1\t.\tgene\t1000\t2000\t.\t+\t.\tID=gene1;Name=GeneA\n\
+                        chr1\t.\tgene\t1000\t2000\t.\t+\t.\tID=gene2;Name=GeneB\n\
+                        chr1\t.\tmRNA\t1000\t2000\t.\t+\t.\tID=mrna1;Parent=gene1,gene2\n\
+                        chr1\t.\tCDS\t1100\t1200\t.\t+\t0\tID=cds1;Parent=mrna1\n";
+
+        let cursor = Cursor::new(gff_data);
+        let result = get_gene_annotation_from_reader("GeneA", cursor, None).unwrap();
+        assert_eq!(result.gene_id, "gene1");
+        assert_eq!(result.mrna_id, "mrna1");
+        assert_eq!(result.cds_list.len(), 1);
+    }
+
+    #[test]
+    fn test_gff_no_prefix_false_match() {
+        // gene10 should NOT match gene1 via prefix
+        let gff_data = "chr1\t.\tgene\t1000\t2000\t.\t+\t.\tID=gene1;Name=GeneOne\n\
+                        chr1\t.\tgene\t3000\t4000\t.\t+\t.\tID=gene10;Name=GeneTen\n\
+                        chr1\t.\tmRNA\t3000\t4000\t.\t+\t.\tID=mrna10;Parent=gene10\n\
+                        chr1\t.\tCDS\t3100\t3200\t.\t+\t0\tID=cds10;Parent=mrna10\n";
+
+        // gene1 has no mRNA children — should error
+        let cursor = Cursor::new(gff_data);
+        let result = get_gene_annotation_from_reader("GeneOne", cursor, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_gff_attribute_values() {
+        assert_eq!(get_gff_attribute_values("ID=cds1;Parent=mrna1,mrna2", "Parent"), vec!["mrna1", "mrna2"]);
+        assert_eq!(get_gff_attribute_values("ID=cds1;Parent=mrna1", "Parent"), vec!["mrna1"]);
+        assert_eq!(get_gff_attribute_values("ID=cds1;Name=foo", "Parent"), Vec::<&str>::new());
+        assert_eq!(get_gff_attribute_values("Parent=a,b,c;ID=x", "Parent"), vec!["a", "b", "c"]);
     }
 }
