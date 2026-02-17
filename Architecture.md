@@ -263,7 +263,7 @@ The LOESS approach is recommended when GC bias appears curved rather than linear
 
 #### Level Finding (`find_levels`)
 
-Histogram-based peak detection matching scipy `find_peaks` behavior:
+Histogram-based peak detection with local maxima and distance filtering:
 
 1. Compute adaptive histogram bin width from the coverage data
 2. Build histogram of all coverage values (autosomes + sex chromosomes), trimmed at 95th percentile per segment

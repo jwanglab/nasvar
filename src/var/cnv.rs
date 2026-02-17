@@ -109,7 +109,6 @@ fn internal_del_dup(
         for (i, h0) in alns.iter().enumerate() {
             for h1 in alns.iter().skip(i + 1) {
 
-                // logic from python
                 // Cast to i64 to avoid underflow when alignments don't overlap
                 let q_overlap =
                     std::cmp::min(h0.qe, h1.qe) as i64 - std::cmp::max(h0.qs, h1.qs) as i64;
@@ -418,7 +417,7 @@ pub fn call_cnvs(
         calculate_focal_depths(bam, targets)?
     };
 
-    // Calculate median of focal depths from DIPLOID genes only (matching Python)
+    // Calculate median of focal depths from DIPLOID genes only
     // Use exclude_from_baseline from config
     let exclude_list = &config.genes.cnv.exclude_from_baseline;
 
@@ -520,7 +519,7 @@ pub fn call_cnvs(
             } else {
                 depth / median_focal * 2.0
             };
-            // Clamp negative CN values to 0 (matching Python reference)
+            // Clamp negative CN values to 0
             let cn = if cn < 0.0 { 0.0 } else { cn };
             gene_result.focal = Some(cn);
         }
@@ -528,7 +527,7 @@ pub fn call_cnvs(
         // Local CN - using raw bin depth and karyotype-based baseline
         if let Some(bin_depth) = local_depths_raw.get(g) {
             let cn = if let Some(br) = effective_blast_ratio {
-                // Use Python's formula with blast ratio:
+                // Blast ratio formula:
                 // expected_3n = br*3*covg_2n/2 + (1-br)*covg_2n
                 // delta = expected_3n - covg_2n
                 // cn = (bin_depth - covg_2n) / delta + 2
@@ -543,7 +542,7 @@ pub fn call_cnvs(
                 // Simple 2n normalization
                 bin_depth / local_baseline * 2.0
             };
-            // Clamp negative CN values to 0 (matching Python reference)
+            // Clamp negative CN values to 0
             let cn = if cn < 0.0 { 0.0 } else { cn };
             gene_result.local = Some(cn);
         }
@@ -572,7 +571,7 @@ pub fn call_cnvs(
                     let mut del_list: Vec<StructuralVariant> = Vec::new();
                     for ((s, e), count) in dels {
                         if count >= min_reads {
-                            // Convert from 1-based (internal) to 0-based (output) to match Python
+                            // Convert from 1-based (internal) to 0-based (output)
                             let s0 = s - 1;
                             let e0 = e - 1;
                             debug!("{} deletion {}-{}: {} reads", g, s0, e0, count);
@@ -588,7 +587,7 @@ pub fn call_cnvs(
                     let mut dup_list: Vec<StructuralVariant> = Vec::new();
                     for ((s, e), count) in dups {
                         if count >= min_reads {
-                            // Convert from 1-based (internal) to 0-based (output) to match Python
+                            // Convert from 1-based (internal) to 0-based (output)
                             let s0 = s - 1;
                             let e0 = e - 1;
                             debug!("{} duplication {}-{}: {} reads", g, s0, e0, count);

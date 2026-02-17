@@ -304,7 +304,7 @@ impl CoverageAccumulator {
                             )?;
                         }
                     } else {
-                        // Truncate to integer like Python does
+                        // Truncate depth to integer for output
                         let value_int = value as u64;
                         writeln!(file, "{}\t{}\t{}\t{}", data.mapped_name, start, end, value_int)?;
                     }

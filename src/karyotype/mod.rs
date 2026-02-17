@@ -102,8 +102,7 @@ fn generate_karyotype_string(cns: &HashMap<String, usize>) -> String {
     let mut chrom_ct = 0;
     let mut mods = Vec::new();
 
-    // Autosomes - match Python logic for chromosome counting
-    // Python: if ANY arm is diploid, count as 2; else if ANY is haploid, count as 1; else min(p,q)
+    // Autosomes: if ANY arm is diploid, count as 2; else if ANY is haploid, count as 1; else min(p,q)
     for i in 1..=22 {
         let s = i.to_string();
         let sp = format!("{}p", i);
@@ -157,8 +156,7 @@ fn generate_karyotype_string(cns: &HashMap<String, usize>) -> String {
             let cp = cns.get(&sp).cloned().unwrap_or(baseline);
             let cq = cns.get(&sq).cloned().unwrap_or(baseline);
 
-            // Check if p == q, treat as whole? Python does:
-            // if f'{aut}' in cns or cns[f'{aut}p'] == cns[f'{aut}q']:
+            // If both arms have the same CN, treat as whole chromosome
             if cp == cq {
                 if cp < baseline {
                     for _ in 0..(baseline - cp) {
@@ -401,7 +399,6 @@ pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig) -> Result<HashMap
         }
         let parts: Vec<&str> = l.split('\t').collect();
         // chrom pos major minor (count) -> or ref alt major minor ?
-        // Python: chrom, pos, major_count, minor_count -> maf = minor/(major+minor)
         // file format: chrom pos major minor ...
         if parts.len() < 4 {
             continue;
@@ -419,7 +416,7 @@ pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig) -> Result<HashMap
         let maf = ref_ct.min(alt_ct) / total;
 
         if maf > 0.1 {
-            // Threshold from Python default/args
+            // MAF > 0.1 threshold filters out homozygous sites
             if let Some(segment) = get_segment_from_pos(&chrom, pos, ref_config) {
                 mafs.entry(segment).or_default().push(maf);
             }
@@ -498,12 +495,12 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
     }
     all_values.sort_by(|a, b| a.total_cmp(b));
 
-    // 2. Bin width - round to integer like Python does
+    // 2. Bin width - round to nearest integer
     let bin_size_raw = find_bin_width(&all_values);
     let bin_size = bin_size_raw.round().max(1.0); // Round to integer, minimum 1
     debug!("Calculated histogram bin size: {:.0}", bin_size);
 
-    // 3. Histogram - match Python: max of 95th percentile per segment
+    // 3. Histogram - range determined by max of 95th percentile per segment
     let trim_percentile = 0.95;
     let max_val = chrom_bins
         .values()
@@ -516,7 +513,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         .fold(0.0_f64, |a, b| a.max(b));
 
     let range_end = max_val + 2.0 * bin_size;
-    // Python uses integer bins: range(0, max + 2*binsize, binsize)
+    // Integer bins: range(0, max + 2*binsize, binsize)
     let num_bins = ((range_end / bin_size).floor() as usize) + 1;
     let mut histogram = vec![0; num_bins];
 
@@ -527,8 +524,8 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         }
     }
 
-    // 4. Find peaks (scipy-style: local maxima + distance post-filter)
-    // Handle plateaus like scipy: find left edge of plateau, verify it's a local max, then take midpoint
+    // 4. Find peaks: local maxima with plateau handling + distance post-filter
+    // For plateaus: find left edge, verify it's a local max, then take midpoint
     let mut local_maxima: Vec<(usize, usize)> = Vec::new(); // (bin_idx, count)
     let mut i = 1;
     while i < histogram.len().saturating_sub(1) {
@@ -628,7 +625,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         }
     }
 
-    // Match Python: assign each segment to its CLOSEST level (argmin), not just any level within 0.3
+    // Assign each segment to its closest level (argmin of ratio difference)
     // Then keep only levels that have at least one AUTOSOMAL segment assigned
     // (levels with only sex chromosomes shouldn't define tumor ploidy)
     let level_values: Vec<f64> = refined_peaks.iter().map(|(v, _)| *v).collect();
@@ -663,8 +660,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
 
     // 8. Filter duplicates (close peaks)
     // Tolerance 9.5%
-    // Python code keeps the first (largest because we sorted?), discards others within tolerance.
-    // Wait, Python sorts by height initially. Yes.
+    // Peaks are sorted by height; keep the tallest, discard others within tolerance.
 
     let mut final_peaks = Vec::new();
     let mut discarded_indices = std::collections::HashSet::new();
@@ -983,7 +979,7 @@ pub fn call_karyotype(
         karyotype.insert(chr.clone(), cn);
     }
 
-    // ============ POST-ASSIGNMENT ADJUSTMENTS (matching Python reference) ============
+    // ============ POST-ASSIGNMENT ADJUSTMENTS ============
 
     // Collect cn_depths for adjustment logic
     let mut cn_depths: HashMap<usize, Vec<f64>> = HashMap::new();
@@ -1104,7 +1100,7 @@ pub fn call_karyotype(
     let y_in_tumor_cn1_bin = y_med > cn1 - delta / 2.0 && y_med < cn1 + delta / 2.0;
 
     // Also skip if MAF data confirms the lower level is genuinely diploid (MAF peak > 0.4)
-    // This matches Python's predict_karyo_maf which doesn't have hypodiploid adjustment
+    // MAF-based karyotype prediction doesn't use hypodiploid adjustment
     let maf_confirms_diploid = levels_maf_peaks
         .as_ref()
         .and_then(|peaks| peaks.get(&0)) // Level 0 is the cn2 level (highest count)
