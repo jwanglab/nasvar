@@ -25,8 +25,7 @@ pub fn read_bed_from_reader<R: BufRead>(reader: R) -> Result<Vec<BedRegion>, Box
 
         let parts: Vec<&str> = line.split('\t').collect();
         if parts.len() < 3 {
-             eprintln!("Warning: skipping malformed BED line {}: {}", i+1, line);
-             continue;
+             return Err(format!("Malformed BED line {} (expected at least 3 columns, got {}): {}", i+1, parts.len(), line).into());
         }
 
         let chrom = parts[0].to_string();
@@ -72,14 +71,11 @@ mod tests {
 
     #[test]
     fn test_bed_malformed() {
-        // Line 2 is malformed (only 2 cols), should skip or error?
-        // Logic says: eprint warning and continue.
+        // Line 2 is malformed (only 2 cols) — should be a fatal error
         let data = "chr1\t100\t200\nchr2\t500\nchr3\t1000\t2000";
         let cursor = Cursor::new(data);
-        let regions = read_bed_from_reader(cursor).unwrap();
-
-        assert_eq!(regions.len(), 2);
-        assert_eq!(regions[0].segment, "chr1");
-        assert_eq!(regions[1].segment, "chr3");
+        let result = read_bed_from_reader(cursor);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Malformed BED line 2"));
     }
 }
