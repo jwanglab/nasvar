@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 use crate::bam::{ContigMapper, AlignmentCoords, fix_sam_coords};
-use crate::input::{AlignmentInput, CigarKind};
+use crate::input::AlignmentInput;
 use crate::config::{PipelineConfig, ReferenceConfig};
 use crate::output::{CnvOutput, CnvGeneResult, KaryotypeOutput, StructuralVariant};
 use crate::utils::bed::BedRegion;
@@ -91,20 +91,7 @@ fn internal_del_dup(
             Some(p) => p as i32,
             _ => continue,
         };
-        let mut end = start;
-        // calculate end from cigar
-        for &(op, len) in record.cigar_ops() {
-            match op {
-                CigarKind::Match
-                | CigarKind::SequenceMatch
-                | CigarKind::SequenceMismatch
-                | CigarKind::Deletion
-                | CigarKind::Skip => {
-                    end += len as i32;
-                }
-                _ => {}
-            }
-        }
+        let end = start + record.alignment_span() as i32;
 
         // fix SAM coords to match canonical query
         let sa = fix_sam_coords(start as u32, end as u32, &record.cigar_raw(), record.flags())?;
