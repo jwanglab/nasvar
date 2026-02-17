@@ -502,7 +502,7 @@ fn main() {
                 }
             };
 
-            match nasvar::karyotype::call_karyotype_gc_corrected(coverage, maf.as_deref(), out_prefix, None, &ref_config, &pipeline_config.thresholds.karyotype, *gc_correction) {
+            match nasvar::karyotype::call_karyotype_gc_corrected(coverage, maf.as_deref(), out_prefix, None, &ref_config, &pipeline_config.thresholds.karyotype, *gc_correction, None) {
                 Ok(karyo_output) => {
                     let collector = OutputCollector::new().with_karyotype(karyo_output);
                     if let Err(e) = collector.write_to_prefix(out_prefix) {
@@ -861,6 +861,7 @@ fn main() {
 
             // Karyotype (two-pass with GC bias correction)
             timer.start("Karyotype Analysis");
+            let seg_bases = nasvar::karyotype::compute_seg_bases(&s_vec, &e_vec, &ref_config);
             let (karyo_result, est_blast_ratio) = match nasvar::karyotype::call_karyotype_gc_corrected(
                 &cov_file,
                 Some(&maf_file),
@@ -869,6 +870,7 @@ fn main() {
                 &ref_config,
                 &pipeline_config.thresholds.karyotype,
                 *gc_correction,
+                Some(&seg_bases),
             ) {
                 Ok(karyo_output) => {
                     let br = karyo_output.blast_ratio;

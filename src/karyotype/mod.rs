@@ -4,6 +4,8 @@ use log::{info, warn, debug};
 use crate::bam::ContigMapper;
 use crate::config::{KaryotypeThresholds, ReferenceConfig};
 use crate::output::KaryotypeOutput;
+use crate::var::maf::Site;
+use crate::utils::bed::BedRegion;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -799,48 +801,48 @@ fn find_maf_peak(levels_maf: &HashMap<usize, Vec<f64>>) -> HashMap<usize, f64> {
     levels_maf_peak
 }
 
-fn get_seg_bases() -> HashMap<&'static str, u32> {
-    HashMap::from([
-        ("1p", 20725),
-        ("1q", 9866),
-        ("2p", 6068),
-        ("2q", 15246),
-        ("3p", 6912),
-        ("3q", 14854),
-        ("4p", 981),
-        ("4q", 14323),
-        ("5p", 2773),
-        ("5q", 17629),
-        ("6p", 3578),
-        ("6q", 20454),
-        ("7p", 11499),
-        ("7q", 24100),
-        ("8p", 2515),
-        ("8q", 12487),
-        ("9p", 22318),
-        ("9q", 10544),
-        ("10p", 2854),
-        ("10q", 8013),
-        ("11p", 7732),
-        ("11q", 7528),
-        ("12p", 9862),
-        ("12q", 5815),
-        ("13", 7174),
-        ("14", 25099),
-        ("15", 9105),
-        ("16p", 7366),
-        ("16q", 5599),
-        ("17p", 3163),
-        ("17q", 13396),
-        ("18q", 9210),
-        ("19p", 12326),
-        ("19q", 5317),
-        ("20p", 4169),
-        ("20q", 3038),
-        ("21", 7285),
-        ("22", 15080),
-        ("X", 10688),
-    ])
+/// Compute the number of variant sites per chromosome arm segment that fall
+/// within enriched BED regions. Used to assess MAF data sufficiency.
+pub fn compute_seg_bases(
+    sites: &[Vec<Site>],
+    enriched: &[BedRegion],
+    ref_config: &ReferenceConfig,
+) -> HashMap<String, usize> {
+    let mapper = ContigMapper::new();
+
+    // Group enriched intervals by chromosome index
+    let mut bed_by_idx: Vec<Vec<(u32, u32)>> = vec![Vec::new(); 24];
+    for region in enriched {
+        if let Some(idx) = mapper.get_chr_index(&region.segment) {
+            if idx < 24 {
+                bed_by_idx[idx].push((region.start, region.end));
+            }
+        }
+    }
+
+    let mut seg_counts: HashMap<String, usize> = HashMap::new();
+
+    for (idx, chr_sites) in sites.iter().enumerate() {
+        if idx >= 24 { break; }
+        let chrom = match ContigMapper::chr_name_from_index(idx) {
+            Some(name) => name,
+            None => continue,
+        };
+        let intervals = &bed_by_idx[idx];
+        if intervals.is_empty() { continue; }
+
+        for site in chr_sites {
+            let pos = site.pos as u32;
+            let in_enriched = intervals.iter().any(|&(start, end)| pos >= start && pos <= end);
+            if in_enriched {
+                if let Some(seg) = get_segment_from_pos(chrom, pos, ref_config) {
+                    *seg_counts.entry(seg).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
+    seg_counts
 }
 
 pub fn call_karyotype(
@@ -849,6 +851,7 @@ pub fn call_karyotype(
     reads_aligned: Option<u64>,
     ref_config: &ReferenceConfig,
     thresholds: &KaryotypeThresholds,
+    seg_bases: Option<&HashMap<String, usize>>,
 ) -> Result<KaryotypeOutput, Box<dyn std::error::Error>> {
     let bins = parse_coverage(cov_path)?;
     let mut warnings: Vec<String> = Vec::new();
@@ -898,24 +901,32 @@ pub fn call_karyotype(
         let maf_data = parse_maf(mp, ref_config)?;
         if !maf_data.is_empty() {
             // Check sufficiency: count segments with >1% MAF density
-            let seg_bases = get_seg_bases();
-            let mut sufficient_segs = 0;
-
-            for (seg, data) in &maf_data {
-                if let Some(&bases) = seg_bases.get(seg.as_str()) {
-                    let ratio = data.len() as f64 / bases as f64;
-                    if ratio > 0.01 {
-                        sufficient_segs += 1;
+            let maf_sufficient = if let Some(sb) = seg_bases {
+                let mut sufficient_segs = 0;
+                for (seg, data) in &maf_data {
+                    if let Some(&bases) = sb.get(seg) {
+                        if bases > 0 {
+                            let ratio = data.len() as f64 / bases as f64;
+                            if ratio > 0.01 {
+                                sufficient_segs += 1;
+                            }
+                        }
                     }
                 }
-            }
-
-            if sufficient_segs < 20 {
-                let w = "Not enough MAF data for karyotyping!".to_string();
-                warn!("{}", w);
-                warnings.push(w);
-                // levels_maf_peaks remains None
+                if sufficient_segs < 20 {
+                    let w = "Not enough MAF data for karyotyping!".to_string();
+                    warn!("{}", w);
+                    warnings.push(w);
+                    false
+                } else {
+                    true
+                }
             } else {
+                debug!("seg_bases not provided, skipping MAF sufficiency check");
+                true
+            };
+
+            if maf_sufficient {
                 let lvls_maf = find_levels_maf(&maf_data, &levels, &medians);
                 let peaks = find_maf_peak(&lvls_maf);
                 if !peaks.is_empty() {
@@ -1661,10 +1672,11 @@ pub fn call_karyotype_gc_corrected(
     ref_config: &ReferenceConfig,
     thresholds: &KaryotypeThresholds,
     gc_correction: GcCorrectionMethod,
+    seg_bases: Option<&HashMap<String, usize>>,
 ) -> Result<KaryotypeOutput, Box<dyn std::error::Error>> {
     // Pass 1: initial karyotype
     info!("=== GC Correction Pass 1: Initial karyotype ===");
-    let initial_output = call_karyotype(cov_path, maf_path, reads_aligned, ref_config, thresholds)?;
+    let initial_output = call_karyotype(cov_path, maf_path, reads_aligned, ref_config, thresholds, seg_bases)?;
 
     // If no GC correction requested, return Pass 1 directly
     if gc_correction == GcCorrectionMethod::None {
@@ -1711,6 +1723,7 @@ pub fn call_karyotype_gc_corrected(
         reads_aligned,
         ref_config,
         thresholds,
+        seg_bases,
     );
 
     // Plot post-correction karyotype
@@ -1733,3 +1746,4 @@ pub fn call_karyotype_gc_corrected(
 
     result
 }
+
