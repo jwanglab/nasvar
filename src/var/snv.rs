@@ -406,7 +406,7 @@ pub fn call_snvs(
         let avg_depth = total_depth as f64 / cds_len as f64;
 
         // Perform Phasing
-        let mut phasing_map: HashMap<String, Option<bool>> = HashMap::new();
+        let mut phasing_map: HashMap<(usize, usize), Option<bool>> = HashMap::new();
 
         for i in 0..muts.len() {
             let (p1, r1, a1, _) = muts[i];
@@ -415,7 +415,7 @@ pub fn call_snvs(
             for &(p2, r2, a2, _) in muts.iter().skip(i + 1) {
                 let idx2 = p2 - 1;
 
-                let key = format!("{}-{}", p1, p2);
+                let key = (p1, p2);
 
                 let mut cis_count = 0;
                 let mut trans_count = 0;
@@ -473,7 +473,7 @@ pub fn call_snvs(
                                 let m1 = muts[matching_indices[i]];
                                 let m2 = muts[matching_indices[j]];
 
-                                let key = format!("{}-{}", m1.0, m2.0);
+                                let key = (m1.0, m2.0);
                                 if let Some(status) = phasing_map.get(&key) {
                                     if *status != Some(true) {
                                         phased_ok = false;
