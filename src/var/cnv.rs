@@ -250,11 +250,6 @@ fn calculate_focal_depths(
 
         for result in query {
             let record = result?;
-            // Approximate depth: sum(read lengths overlapping) / region length?
-            // Or count bases.
-            // Let's use simple read counting or base counting.
-            // Python uses `f["qc"]["gene_coverage"][gene]`. This implies average depth.
-
             let a_start = match record.alignment_start() {
                 Some(p) => p,
                 _ => continue,
