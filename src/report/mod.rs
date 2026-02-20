@@ -444,7 +444,7 @@ fn format_structural_variants(md: &mut String, gene: Option<&CnvGeneResult>, del
 }
 
 fn build_itd_section(md: &mut String, itds: &ItdOutput, config: Option<&PipelineConfig>) {
-    md.push_str("## Internal/partial tandem duplications\n\n");
+    md.push_str("## Insertions/ITDs\n\n");
 
     let genes: Vec<String> = if let Some(cfg) = config {
         let mut g: Vec<String> = cfg.genes.itd.keys().cloned().collect();
@@ -457,7 +457,11 @@ fn build_itd_section(md: &mut String, itds: &ItdOutput, config: Option<&Pipeline
     };
 
     for gene in &genes {
-        md.push_str(&format!("### {} internal tandem duplication (ITD)\n\n", gene));
+        let label = config
+            .and_then(|cfg| cfg.genes.itd.get(gene.as_str()))
+            .map(|r| r.label.as_str())
+            .unwrap_or("ITD");
+        md.push_str(&format!("### {} {}\n\n", gene, label));
         match itds.genes.get(gene.as_str()) {
             Some(entries) if !entries.is_empty() => {
                 for e in entries {
@@ -619,8 +623,8 @@ fn build_methodology_section(md: &mut String, config: Option<&PipelineConfig>) {
     md.push_str("**Digital Karyotype and Copy Number Variants:** ");
     md.push_str("Copy number across the genome at the chromosome level ('digital karyotype') is inferred based on relative sequencing depth and minor allele frequency (MAF). To avoid the potentially confounding effect of adaptive sampling on relative sequencing depth assessment, coarse-scale depth is constructed as a function of reads per million base pairs (Mbp), where each read contributes a count of one to the bin in which the center of the read aligns. Depth is corrected for GC bias using a linear correction model.\n\n");
 
-    // ITD - dynamic from config.genes.itd
-    md.push_str("**Internal Tandem Duplications**\n\n");
+    // ITD / insertion detection - dynamic from config.genes.itd
+    md.push_str("**Insertions/ITDs**\n\n");
     if let Some(cfg) = config {
         let mut genes: Vec<_> = cfg.genes.itd.iter().collect();
         genes.sort_by_key(|(name, _)| *name);
@@ -1103,7 +1107,7 @@ fn print_stdout_summary(
 
     let has_itd = itds.genes.values().any(|v| !v.is_empty());
     if has_itd {
-        println!("=== ITDs ===");
+        println!("=== Insertions/ITDs ===");
         for (gene, entries) in &itds.genes {
             for e in entries {
                 let ar = if e.coverage > e.merged {

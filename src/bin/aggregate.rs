@@ -295,10 +295,10 @@ fn process_directory(
         }
     }
 
-    // ----------------------- ITD ----------------------------
+    // ----------------------- ITD / insertions ----------------------------
     if let Some(ref itd_data) = unified.itd {
-        for gene in &config.itd_genes {
-            let key = format!("{}_ITD", gene);
+        for (gene, label) in &config.itd_genes {
+            let key = format!("{}_{}", gene, label);
             if let Some(itds) = itd_data.genes.get(gene.as_str()) {
                 if !itds.is_empty() {
                     let text = itds
@@ -416,12 +416,14 @@ fn build_columns(config: &AggregateConfig) -> Vec<String> {
         cols.push(format!("{}_depth", gene));
     }
 
-    // ITD genes (from ITD caller): {gene}_ITD
-    for gene in &config.itd_genes {
-        cols.push(format!("{}_ITD", gene));
+    // ITD / insertion genes (from ITD caller): {gene}_{label}
+    let mut sorted_itd: Vec<_> = config.itd_genes.iter().collect();
+    sorted_itd.sort_by_key(|(name, _)| *name);
+    for (gene, label) in sorted_itd {
+        cols.push(format!("{}_{}", gene, label));
     }
 
-    // Duplication genes (from CNV caller): {gene}_ITD (skip if already present from ITD)
+    // Duplication genes (from CNV caller): {gene}_ITD (skip if already present)
     for gene in &config.duplication_genes {
         let col = format!("{}_ITD", gene);
         if !cols.contains(&col) {

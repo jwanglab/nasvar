@@ -37,7 +37,7 @@ impl ReferenceConfig {
 // Pipeline Configuration
 // ============================================================================
 
-/// ITD region configuration
+/// ITD / insertion region configuration
 #[derive(Deserialize, Debug, Clone)]
 pub struct ItdRegion {
     pub chrom: String,
@@ -47,9 +47,13 @@ pub struct ItdRegion {
     pub min_length: isize,
     #[serde(default)]
     pub min_frequency: f64,
+    /// Display label for reports/columns (e.g. "ITD", "insertion"). Defaults to "ITD".
+    #[serde(default = "default_itd_label")]
+    pub label: String,
 }
 
 fn default_min_length() -> isize { 3 }
+fn default_itd_label() -> String { "ITD".to_string() }
 
 /// CNV gene configuration
 #[derive(Deserialize, Debug, Clone)]
@@ -422,9 +426,9 @@ pub struct FusionSpecialGene {
 /// Aggregate report configuration
 #[derive(Deserialize, Debug, Clone)]
 pub struct AggregateConfig {
-    /// ITD genes to report (from ITD caller)
+    /// ITD/insertion genes to report (gene name -> label, e.g. "FLT3": "ITD")
     #[serde(default)]
-    pub itd_genes: Vec<String>,
+    pub itd_genes: HashMap<String, String>,
     /// CNV genes to report focal CN for
     #[serde(default)]
     pub cnv_genes: Vec<String>,
@@ -501,7 +505,7 @@ impl AggregateConfig {
 impl Default for AggregateConfig {
     fn default() -> Self {
         Self {
-            itd_genes: vec![],
+            itd_genes: HashMap::new(),
             cnv_genes: vec![],
             local_cn_genes: vec![],
             deletion_genes: vec![],

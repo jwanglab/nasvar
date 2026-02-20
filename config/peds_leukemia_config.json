@@ -28,7 +28,8 @@
         "start": 171950855,
         "end": 171950893,
         "min_length": 4,
-        "min_frequency": 0.05
+        "min_frequency": 0.05,
+        "label": "insertion"
       }
     },
     "snv": {
