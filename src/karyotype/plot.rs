@@ -15,56 +15,55 @@ const SEGMENT_ORDER: &[&str] = &[
 
 const GAP: f64 = 3.0;
 
-/// Downsample scatter data by binning into pixel-width buckets and keeping at most
-/// `max_per_bucket` evenly-spaced points per bucket. Small datasets pass through unchanged.
-fn downsample_scatter(
+/// Deduplicate scatter data by pixel coordinate, grouping by overlap count.
+///
+/// Returns `max_levels` buckets: bucket 0 = pixels with exactly 1 point,
+/// bucket 1 = 2 points, ..., bucket max_levels-1 = max_levels or more points.
+/// Each bucket contains the data-space coordinates of one representative point
+/// per unique pixel. Render each bucket at increasing opacity for density.
+fn dedup_by_pixel_density(
     x: &[f64],
     y: &[f64],
     plot_width_px: f64,
+    plot_height_px: f64,
     x_min: f64,
     x_max: f64,
-    max_per_bucket: usize,
-) -> (Vec<f64>, Vec<f64>) {
-    let target = plot_width_px as usize * max_per_bucket;
-    if x.len() <= target {
-        return (x.to_vec(), y.to_vec());
-    }
+    y_min: f64,
+    y_max: f64,
+    max_levels: usize,
+) -> Vec<(Vec<f64>, Vec<f64>)> {
+    let max_levels = max_levels.max(1);
+    let mut levels: Vec<(Vec<f64>, Vec<f64>)> = (0..max_levels).map(|_| (Vec::new(), Vec::new())).collect();
 
     let x_range = x_max - x_min;
-    if x_range <= 0.0 {
-        return (x.to_vec(), y.to_vec());
-    }
-
-    // Bucket points by pixel column
-    let n_buckets = plot_width_px as usize;
-    let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); n_buckets + 1];
-    for (i, &xi) in x.iter().enumerate() {
-        let col = (((xi - x_min) / x_range) * plot_width_px) as usize;
-        let col = col.min(n_buckets);
-        buckets[col].push(i);
-    }
-
-    // Stratified sampling: take evenly spaced indices from each bucket
-    let mut out_x = Vec::with_capacity(target);
-    let mut out_y = Vec::with_capacity(target);
-    for bucket in &buckets {
-        let n = bucket.len();
-        if n <= max_per_bucket {
-            for &idx in bucket {
-                out_x.push(x[idx]);
-                out_y.push(y[idx]);
-            }
-        } else {
-            let stride = n as f64 / max_per_bucket as f64;
-            for j in 0..max_per_bucket {
-                let idx = bucket[(j as f64 * stride) as usize];
-                out_x.push(x[idx]);
-                out_y.push(y[idx]);
-            }
+    let y_range = y_max - y_min;
+    if x_range <= 0.0 || y_range <= 0.0 {
+        if !x.is_empty() {
+            levels[0] = (x.to_vec(), y.to_vec());
         }
+        return levels;
     }
 
-    (out_x, out_y)
+    // Count overlaps per pixel, keeping the first data-space coords as representative
+    let mut pixels: std::collections::HashMap<(i32, i32), (f64, f64, u32)> =
+        std::collections::HashMap::with_capacity(x.len() / 2);
+
+    for (&xi, &yi) in x.iter().zip(y.iter()) {
+        let px = ((xi - x_min) / x_range * plot_width_px) as i32;
+        let py = ((yi - y_min) / y_range * plot_height_px) as i32;
+        pixels.entry((px, py))
+            .and_modify(|e| e.2 += 1)
+            .or_insert((xi, yi, 1));
+    }
+
+    // Partition into density buckets
+    for (_, (dx, dy, count)) in pixels {
+        let bucket = (count as usize - 1).min(max_levels - 1);
+        levels[bucket].0.push(dx);
+        levels[bucket].1.push(dy);
+    }
+
+    levels
 }
 
 /// Plot a karyotype coverage scatter with segment medians.
@@ -438,19 +437,24 @@ pub fn plot_karyotype_with_baf(
         let ax = fig.add_subplot(2, 1, 2);
 
         if !baf_x.is_empty() {
-            let (ds_x, ds_y) = downsample_scatter(
+            let n_levels = 5;
+            let levels = dedup_by_pixel_density(
                 &baf_x, &baf_y,
-                1600.0,
-                -(GAP / 2.0),
-                layout.x_max - GAP / 2.0,
-                10,
+                1600.0, 350.0,
+                -(GAP / 2.0), layout.x_max - GAP / 2.0,
+                0.0, 1.0,
+                n_levels,
             );
-            ax.scatter(&ds_x, &ds_y)
-                .color("blue")
-                .size(3.0)
-                .alpha(0.5)
-                .edge_width(0.0)
-                .build();
+            for (i, (lx, ly)) in levels.iter().enumerate() {
+                if lx.is_empty() { continue; }
+                let alpha = 0.2 + 0.8 * (i as f64 / (n_levels - 1) as f64);
+                ax.scatter(lx, ly)
+                    .color("blue")
+                    .size(3.0)
+                    .alpha(alpha)
+                    .edge_width(0.0)
+                    .build();
+            }
         }
 
         for &sx in &layout.separator_x {
