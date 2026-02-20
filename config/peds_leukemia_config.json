@@ -25,8 +25,8 @@
       },
       "NPM1": {
         "chrom": "NC_060929.1",
-        "start": 171931630,
-        "end": 171931750,
+        "start": 171950855,
+        "end": 171950893,
         "min_length": 4,
         "min_frequency": 0.05
       }
