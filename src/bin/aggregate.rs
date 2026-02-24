@@ -418,7 +418,7 @@ fn build_columns(config: &AggregateConfig) -> Vec<String> {
 
     // ITD / insertion genes (from ITD caller): {gene}_{label}
     let mut sorted_itd: Vec<_> = config.itd_genes.iter().collect();
-    sorted_itd.sort_by_key(|(name, _)| *name);
+    sorted_itd.sort();
     for (gene, label) in sorted_itd {
         cols.push(format!("{}_{}", gene, label));
     }

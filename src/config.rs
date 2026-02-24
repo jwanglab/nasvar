@@ -426,7 +426,7 @@ pub struct FusionSpecialGene {
 /// Aggregate report configuration
 #[derive(Deserialize, Debug, Clone)]
 pub struct AggregateConfig {
-    /// ITD/insertion genes to report (gene name -> label, e.g. "FLT3": "ITD")
+    /// ITD/insertion genes to report (gene name -> label, e.g. "FLT3": "ITD", "NPM1": "insertion")
     #[serde(default)]
     pub itd_genes: HashMap<String, String>,
     /// CNV genes to report focal CN for
