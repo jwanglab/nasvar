@@ -70,7 +70,7 @@ The `PipelineRunner` (`src/pipeline/mod.rs`) processes the BAM file once and fee
 - **CoverageAccumulator** -- bins reads into 1 Mb windows, masks repeats via `BitVec`, tracks GC content
 - **MafAccumulator** -- counts ref/alt alleles at pre-specified SNP sites using binary search
 - **FusionScanner** -- identifies reads overlapping fusion target regions, collects read names for Pass 2
-- **FocalDepthAccumulator** -- computes per-gene depth for CNV focal genes
+- **QcAccumulator** -- tracks on-target QC metrics AND per-gene focal depths in a single pass
 
 This avoids redundant full-genome scans, reducing I/O from 7+ passes to 2.
 
@@ -81,7 +81,7 @@ for each record:
     coverage_accumulator.process(&record)
     maf_accumulator.process(&record)
     fusion_scanner.process(&record)
-    focal_depth_accumulator.process(&record)
+    qc_accumulator.process(&record)
 ```
 
 **CoverageAccumulator**:
@@ -89,6 +89,7 @@ for each record:
 - Bins reads into configurable windows (default 1 Mb)
 - Tracks per-bin GC content queried from the reference FASTA at initialization
 - Only counts primary alignments (skips supplementary/secondary)
+- Does NOT walk the CIGAR -- simply increments a bin counter based on alignment start position
 
 **MafAccumulator**:
 - Pre-indexes sites by chromosome and position
@@ -100,11 +101,17 @@ for each record:
 - Builds a `HashMap` of target regions by reference ID
 - Checks read overlap with targets (including configurable margin per gene)
 - Collects read names in a `HashSet` for Pass 2 re-query
-- Tracks QC metrics: `nt_on_target`, `reads_on_target`, `target_regions_nt`
 
-**FocalDepthAccumulator**:
-- Computes exact depth over each focal gene region
-- Returns `HashMap<gene_name, depth>` consumed by the CNV caller
+**QcAccumulator**:
+- Maintains a flat `Vec<PerTarget>` of per-BED-entry tracking, indexed by `by_ref: HashMap<ref_id, Vec<index>>`
+- Counts primary aligned reads (`reads_aligned`) via flag check (`& 0x904 == 0`)
+- Uses `alignment_span()` for a quick overlap check (with 5000 bp margin around each target)
+- When a read overlaps a target, walks CIGAR ops to count only M/=/X bases clipped to the actual target interval (no margin)
+- Accumulates both per-target bases (`PerTarget.total_bases`) and aggregate totals (`nt_on_target`, `reads_on_target`)
+- `reads_on_target` counted once per read even if it overlaps multiple targets
+- `nt_on_target` sums across all overlapping targets
+- `focal_depths()` aggregates per-target bases by gene name (sum bases / sum lengths), properly handling multiple BED entries sharing the same gene name
+- Output: `PipelineQcData` for aggregate QC metrics, `HashMap<String, f64>` for per-gene depths (consumed by CNV caller and written to `target_coverage` in result JSON)
 
 ### 2. Builder Pattern (PipelineRunner)
 
@@ -116,7 +123,6 @@ PipelineRunner::new(bam_path, out_prefix)
     .with_coverage(repeats)
     .with_maf(sites, enriched)
     .with_fusions(targets)
-    .with_focal_targets(targets)
     .with_one_sided(one_sided_genes)
     .with_partner_index(partner_index)
     .with_config(&config)
@@ -172,7 +178,7 @@ Pass 1: PipelineRunner.run()
   ├── CoverageAccumulator  ──→  {prefix}.coverage.tsv
   ├── MafAccumulator       ──→  {prefix}.maf
   ├── FusionScanner        ──→  candidate read names (HashSet)
-  └── FocalDepthAccumulator ──→  HashMap<gene, depth>
+  └── QcAccumulator        ──→  PipelineQcData + HashMap<gene, depth>
        │
        ▼
 Pass 2: Fusion Refinement
@@ -502,7 +508,7 @@ Top-level structure:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `itd_genes` | `Vec<String>` | ITD genes to include in report |
+| `itd_genes` | `HashMap<String, String>` | ITD/insertion genes with labels (gene → label, e.g. "FLT3" → "ITD", "NPM1" → "insertion") |
 | `cnv_genes` | `Vec<String>` | CNV focal genes |
 | `local_cn_genes` | `Vec<String>` | Genes showing local CN instead of focal |
 | `deletion_genes` | `Vec<String>` | Genes to report deletions for |
@@ -579,7 +585,7 @@ Single JSON file containing all analysis results via `UnifiedOutput`. Fields are
 | `version` | `String` | Pipeline version |
 | `timestamp` | `String` | ISO 8601 timestamp |
 | `metadata` | `SequencingMetaData` | BAM header metadata (instrument, run, flowcell) |
-| `qc` | `QcOutput` | On-target nt, reads, mean coverage, total aligned reads |
+| `qc` | `QcOutput` | On-target nt, reads, mean coverage, total aligned reads, per-target coverage |
 | `fusions` | `FusionsOutput` | Fusion events, spike-in controls |
 | `karyotype` | `KaryotypeOutput` | Karyotype string, ISCN, per-arm CN, warnings |
 | `cnv` | `CnvOutput` | Per-gene CN, deletions, duplications |
@@ -672,14 +678,12 @@ All configurable parameters use serde `#[serde(default = "...")]` attributes so 
 
 ### Logging
 
-Uses `env_logger` initialized in `main()` with default level `Info`, no timestamps, no module paths:
+Uses `env_logger` initialized in `main()` with default level `Info`, no timestamps, no module paths. Both `nasvar` and `aggregate` support CLI flags for log configuration:
 
-```rust
-env_logger::Builder::from_default_env()
-    .filter_level(log::LevelFilter::Info)
-    .format_timestamp(None)
-    .format_module_path(false)
-    .init();
-```
+| Flag | Description |
+|------|-------------|
+| `--log-level <LEVEL>` | Set verbosity: `error`, `warn`, `info` (default), `debug`, `trace` |
+| `--log-file <PATH>` | Write logs to a file instead of stderr |
+| `--append-log` | Append to the log file instead of truncating it |
 
-Override with `RUST_LOG` environment variable.
+When `--log-file` is specified, the builder uses `Target::Pipe` with a `Box<File>` writer. The `RUST_LOG` environment variable is also supported for fine-grained control.
