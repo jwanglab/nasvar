@@ -139,7 +139,7 @@ pub fn plot_karyotype(
     ax.scatter(&all_x, &all_y)
         .color("blue")
         .size(3.0)
-        .alpha(0.5)
+        .alpha(1.0)
         .edge_width(0.0)
         .build();
 
@@ -404,7 +404,7 @@ pub fn plot_karyotype_with_baf(
         ax.scatter(&cov_x, &cov_y)
             .color("blue")
             .size(3.0)
-            .alpha(0.5)
+            .alpha(1.0)
             .edge_width(0.0)
             .build();
 
