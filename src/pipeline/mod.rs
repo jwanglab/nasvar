@@ -33,8 +33,6 @@ pub struct PipelineRunner<'a> {
     fusion_targets: Option<Vec<BedRegion>>,
     fusion_one_sided: Option<HashSet<String>>,
     fusion_partner_index: Option<PartnerGeneIndex>,
-    // Focal depth targets (CNV genes)
-    focal_targets: Option<Vec<BedRegion>>,
     // Pipeline config
     config: Option<&'a PipelineConfig>,
 }
@@ -51,7 +49,6 @@ impl<'a> PipelineRunner<'a> {
             fusion_targets: None,
             fusion_one_sided: None,
             fusion_partner_index: None,
-            focal_targets: None,
             config: None,
         }
     }
@@ -79,11 +76,6 @@ impl<'a> PipelineRunner<'a> {
 
     pub fn with_one_sided(mut self, genes: Option<HashSet<String>>) -> Self {
         self.fusion_one_sided = genes;
-        self
-    }
-
-    pub fn with_focal_targets(mut self, targets: Vec<BedRegion>) -> Self {
-        self.focal_targets = Some(targets);
         self
     }
 
@@ -139,11 +131,6 @@ impl<'a> PipelineRunner<'a> {
             .as_ref()
             .map(|targets| QcAccumulator::new(&header, targets));
 
-        // focal depth accumulator (to be used for CNV calls later)
-        let mut focal_acc = self
-            .focal_targets
-            .as_ref()
-            .map(|targets| FocalDepthAccumulator::new(&header, targets));
 
         // Main Loop
         info!("Pass 1: Main Scan...");
@@ -176,9 +163,6 @@ impl<'a> PipelineRunner<'a> {
             if let Some(q) = &mut qc_acc {
                 q.process(&record);
             }
-            if let Some(fd) = &mut focal_acc {
-                fd.process(&record);
-            }
         }
         info!("Processed {} reads. Done.", i);
         // Finalize
@@ -193,18 +177,18 @@ impl<'a> PipelineRunner<'a> {
         }
 
         // Finalize QC and get reads_aligned
-        let reads_aligned = if let Some(q) = qc_acc {
+        // Finalize QC + focal depths (both from QcAccumulator)
+        let (reads_aligned, focal_depths) = if let Some(q) = qc_acc {
             let count = q.reads_aligned();
             info!("Total aligned reads (primary): {}", count);
+            let fd = q.focal_depths();
             collector = collector.with_qc(q.to_qc_data());
             collector = collector.with_reads_aligned(count);
-            Some(count)
+            collector = collector.with_target_coverage(fd.clone());
+            (Some(count), Some(fd))
         } else {
-            None
+            (None, None)
         };
-
-        // Finalize focal depths
-        let focal_depths = focal_acc.map(|fd| fd.finalize());
 
         // Fusion Pass 2
         if let Some(f) = fusion_acc {
@@ -407,8 +391,18 @@ impl MafAccumulator {
 
 // ------------------ QC Accumulator ------------------
 
+struct PerTarget {
+    name: String,
+    start: i32,
+    end: i32,
+    total_bases: u64,
+}
+
 pub struct QcAccumulator {
-    target_map: HashMap<usize, Vec<BedRegion>>,
+    /// Per-target tracking (flat list), indexed by `by_ref`
+    targets: Vec<PerTarget>,
+    /// ref_id -> indices into `targets`
+    by_ref: HashMap<usize, Vec<usize>>,
     margin: i32,
     pub nt_on_target: u64,
     pub reads_on_target: u64,
@@ -418,20 +412,28 @@ pub struct QcAccumulator {
 
 impl QcAccumulator {
     pub fn new(header: &AlignmentHeader, targets: &[BedRegion]) -> Self {
-        let mut target_map = HashMap::new();
-        let mut target_regions_nt: u64 = 0;
-
         let mapper = ContigMapper::from_refs(&header.refs);
+        let mut per_targets = Vec::with_capacity(targets.len());
+        let mut by_ref: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut target_regions_nt: u64 = 0;
 
         for t in targets {
             let bam_chrom = mapper.to_bam_name(&t.segment);
-            if let Some(id) = header.refs.iter().position(|r| r == &bam_chrom) {
-                target_map.entry(id).or_insert(Vec::new()).push(t.clone());
+            if let Some(ref_id) = header.refs.iter().position(|r| r == &bam_chrom) {
+                let idx = per_targets.len();
+                per_targets.push(PerTarget {
+                    name: t.name.clone(),
+                    start: t.start as i32,
+                    end: t.end as i32,
+                    total_bases: 0,
+                });
+                by_ref.entry(ref_id).or_default().push(idx);
             }
             target_regions_nt += (t.end - t.start) as u64;
         }
         Self {
-            target_map,
+            targets: per_targets,
+            by_ref,
             margin: 5000,
             nt_on_target: 0,
             reads_on_target: 0,
@@ -450,40 +452,55 @@ impl QcAccumulator {
         if record.ref_id < 0 {
             return;
         }
-        let id = record.ref_id as usize;
+        let ref_id = record.ref_id as usize;
 
-        if let Some(tgt_list) = self.target_map.get(&id) {
-            let start = record.alignment_start().unwrap_or(0) as i32;
-            let mut end = start;
-            let mut read_len: u64 = 0;
+        let indices = match self.by_ref.get(&ref_id) {
+            Some(v) => v,
+            None => return,
+        };
+
+        let start = record.alignment_start().unwrap_or(0) as i32;
+        let end = start + record.alignment_span() as i32;
+        let mut counted_read = false;
+
+        for &idx in indices {
+            let t = &mut self.targets[idx];
+
+            // Use margin for read detection, exact boundaries for base counting
+            let g_st = t.start - self.margin;
+            let g_en = t.end + self.margin;
+            if start > g_en || end < g_st {
+                continue;
+            }
+
+            // Walk CIGAR, count only M/=/X bases clipped to the target interval
+            let mut ref_pos = start;
+            let mut on_target_bases: u64 = 0;
             for &(op, len) in record.cigar_ops() {
+                let len_i = len as i32;
                 match op {
                     CigarKind::Match
                     | CigarKind::SequenceMatch
-                    | CigarKind::SequenceMismatch
-                    | CigarKind::Deletion
-                    | CigarKind::Skip => {
-                        end += len as i32;
+                    | CigarKind::SequenceMismatch => {
+                        let ov_start = ref_pos.max(t.start);
+                        let ov_end = (ref_pos + len_i).min(t.end);
+                        if ov_start < ov_end {
+                            on_target_bases += (ov_end - ov_start) as u64;
+                        }
+                        ref_pos += len_i;
                     }
-                    _ => {}
-                }
-                match op {
-                    CigarKind::Match | CigarKind::SequenceMatch | CigarKind::SequenceMismatch => {
-                        read_len += len as u64;
+                    CigarKind::Deletion | CigarKind::Skip => {
+                        ref_pos += len_i;
                     }
                     _ => {}
                 }
             }
 
-            for tgt in tgt_list {
-                let g_st = tgt.start as i32 - self.margin;
-                let g_en = tgt.end as i32 + self.margin;
-
-                if start <= g_en && end >= g_st {
-                    self.reads_on_target += 1;
-                    self.nt_on_target += read_len;
-                    break;
-                }
+            t.total_bases += on_target_bases;
+            self.nt_on_target += on_target_bases;
+            if !counted_read && on_target_bases > 0 {
+                self.reads_on_target += 1;
+                counted_read = true;
             }
         }
     }
@@ -499,88 +516,23 @@ impl QcAccumulator {
     pub fn reads_aligned(&self) -> u64 {
         self.reads_aligned
     }
-}
 
-// ------------------ Focal Depth Accumulator ------------------
-
-struct FocalTarget {
-    name: String,
-    start: usize,
-    end: usize,
-    total_bases: u64,
-}
-
-pub struct FocalDepthAccumulator {
-    /// Targets sorted by (ref_id, start) for efficient lookup
-    targets: Vec<FocalTarget>,
-    /// Index into `targets` grouped by ref_id for fast filtering
-    by_ref: HashMap<usize, Vec<usize>>,
-}
-
-impl FocalDepthAccumulator {
-    pub fn new(header: &AlignmentHeader, targets: &[BedRegion]) -> Self {
-        let mapper = ContigMapper::from_refs(&header.refs);
-        let mut focal_targets = Vec::with_capacity(targets.len());
-        let mut by_ref: HashMap<usize, Vec<usize>> = HashMap::new();
-
-        for t in targets {
-            let bam_name = mapper.to_bam_name(&t.segment);
-            if let Some(ref_id) = header.refs.iter().position(|r| r == &bam_name) {
-                let idx = focal_targets.len();
-                focal_targets.push(FocalTarget {
-                    name: t.name.clone(),
-                    start: t.start as usize,
-                    end: t.end as usize,
-                    total_bases: 0,
-                });
-                by_ref.entry(ref_id).or_default().push(idx);
-            }
-        }
-
-        Self {
-            targets: focal_targets,
-            by_ref,
-        }
-    }
-
-    pub fn process(&mut self, record: &AlignmentRecord) {
-        if record.ref_id < 0 {
-            return;
-        }
-        let ref_id = record.ref_id as usize;
-
-        let indices = match self.by_ref.get(&ref_id) {
-            Some(v) => v,
-            None => return,
-        };
-
-        let a_start = match record.alignment_start() {
-            Some(p) => p,
-            None => return,
-        };
-        let a_end = a_start + record.alignment_span();
-
-        for &idx in indices {
-            let t = &mut self.targets[idx];
-            let o_start = std::cmp::max(a_start, t.start);
-            let o_end = std::cmp::min(a_end, t.end);
-            if o_end > o_start {
-                t.total_bases += (o_end - o_start) as u64;
-            }
-        }
-    }
-
-    pub fn finalize(self) -> HashMap<String, f64> {
-        let mut depths = HashMap::new();
+    /// Per-gene average depth: total aligned bases / total region length,
+    /// aggregated across all BED entries sharing the same gene name.
+    pub fn focal_depths(&self) -> HashMap<String, f64> {
+        let mut gene_bases: HashMap<String, u64> = HashMap::new();
+        let mut gene_lengths: HashMap<String, u64> = HashMap::new();
         for t in &self.targets {
-            let len = t.end - t.start;
-            let depth = if len > 0 {
-                t.total_bases as f64 / len as f64
-            } else {
-                0.0
-            };
-            depths.insert(t.name.clone(), depth);
+            *gene_bases.entry(t.name.clone()).or_default() += t.total_bases;
+            *gene_lengths.entry(t.name.clone()).or_default() += (t.end - t.start) as u64;
         }
-        depths
+        gene_bases
+            .iter()
+            .map(|(name, &bases)| {
+                let len = gene_lengths[name];
+                let depth = if len > 0 { bases as f64 / len as f64 } else { 0.0 };
+                (name.clone(), depth)
+            })
+            .collect()
     }
 }

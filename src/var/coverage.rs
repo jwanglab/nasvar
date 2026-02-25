@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::Write;
 
 use crate::bam::ContigMapper;
-use crate::input::{AlignmentInput, AlignmentHeader, AlignmentRecord, CigarKind};
+use crate::input::{AlignmentInput, AlignmentHeader, AlignmentRecord};
 use crate::utils::bed::BedRegion;
 use log::{info, debug};
 
@@ -317,60 +317,6 @@ impl CoverageAccumulator {
 
 // ==================== End CoverageAccumulator ====================
 
-pub fn calculate_region_depth(
-    bam: &mut AlignmentInput,
-    chr: &str,
-    s: usize,
-    e: usize,
-) -> Result<Vec<u32>, Box<dyn std::error::Error>>
-{
-    let region = format!("{}:{}-{}", chr, s, e);
-    let query = bam.query(&region)?;
-
-    let mut records = Vec::new();
-    for result in query {
-        records.push(result?);
-    }
-
-    Ok(calculate_depth_from_records(&records, s, e))
-}
-
-pub fn calculate_depth_from_records(records: &[AlignmentRecord], s: usize, e: usize) -> Vec<u32> {
-    let mut covg = vec![0u32; e - s + 1];
-    for record in records {
-        let mut t: usize = record.alignment_start().unwrap_or(0);
-        for &(op, len) in record.cigar_ops() {
-            match op {
-                CigarKind::Match | CigarKind::SequenceMatch | CigarKind::SequenceMismatch => {
-                    if t <= e && t + len >= s {
-                        let end_bound = if t + len < e + 1 { t + len } else { e + 1 };
-                        for i in (if s > t { s } else { t })..end_bound {
-                            if i >= s {
-                                covg[i - s] += 1;
-                            }
-                        }
-                    }
-                    t += len;
-                }
-                CigarKind::Insertion => {}
-                CigarKind::Deletion | CigarKind::Skip | CigarKind::Pad => {
-                    if t <= e && t + len >= s {
-                        let end_bound = if t + len < e + 1 { t + len } else { e + 1 };
-                        for i in (if s > t { s } else { t })..end_bound {
-                            if i >= s {
-                                covg[i - s] += 1;
-                            }
-                        }
-                    }
-                    t += len;
-                }
-                CigarKind::SoftClip | CigarKind::HardClip => {}
-            }
-        }
-    }
-    covg
-}
-
 /// Calculate read depth per 1Mb bin and write to TSV file.
 /// Returns the total count of aligned reads (primary alignments only).
 ///
@@ -402,38 +348,3 @@ pub fn read_depth(
     Ok(reads_aligned)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_calculate_depth_logic() {
-        // Simple overlap
-        let mut rec1 = AlignmentRecord::default();
-        rec1.pos = 10;
-        rec1.cigar = vec![(CigarKind::Match, 5)]; // 5M
-
-        let records = vec![rec1];
-
-        let depth = calculate_depth_from_records(&records, 10, 15);
-        assert_eq!(depth.len(), 6);
-        assert_eq!(depth, vec![0, 1, 1, 1, 1, 1]);
-    }
-
-    #[test]
-    fn test_calculate_depth_deletion() {
-        // 5M 2D 5M
-        let mut rec = AlignmentRecord::default();
-        rec.pos = 10;
-        rec.cigar = vec![
-            (CigarKind::Match, 5),
-            (CigarKind::Deletion, 2),
-            (CigarKind::Match, 5),
-        ];
-
-        let records = vec![rec];
-
-        let depth = calculate_depth_from_records(&records, 15, 18);
-        assert_eq!(depth, vec![1, 1, 1, 1]);
-    }
-}

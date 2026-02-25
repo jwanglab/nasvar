@@ -872,7 +872,6 @@ fn main() {
                 .with_fusions(t_vec.clone())
                 .with_one_sided(os_set.clone())
                 .with_partner_index(partner_index.clone())
-                .with_focal_targets(t_vec.clone())
                 .with_config(&pipeline_config);
 
             let (pipeline_output, reads_aligned, focal_depths) = match runner.run() {

@@ -3,6 +3,7 @@
 //! The `OutputCollector` provides a builder pattern for collecting
 //! results from all pipeline modules into a unified output structure.
 
+use std::collections::HashMap;
 use std::fs::File;
 
 use crate::utils::metadata::SequencingMetaData;
@@ -70,6 +71,19 @@ impl OutputCollector {
         } else {
             self.output.qc = Some(QcOutput {
                 mean_coverage: Some(coverage),
+                ..Default::default()
+            });
+        }
+        self
+    }
+
+    /// Set per-target average coverage on QC data
+    pub fn with_target_coverage(mut self, coverage: HashMap<String, f64>) -> Self {
+        if let Some(ref mut qc) = self.output.qc {
+            qc.target_coverage = Some(coverage);
+        } else {
+            self.output.qc = Some(QcOutput {
+                target_coverage: Some(coverage),
                 ..Default::default()
             });
         }

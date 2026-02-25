@@ -75,6 +75,10 @@ pub struct QcOutput {
     /// Mean coverage across targets
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mean_coverage: Option<f64>,
+
+    /// Per-target average coverage (gene name -> mean depth)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_coverage: Option<HashMap<String, f64>>,
 }
 
 impl From<PipelineQcData> for QcOutput {
@@ -85,6 +89,7 @@ impl From<PipelineQcData> for QcOutput {
             target_regions_nt: qc.target_regions_nt,
             reads_aligned: None,
             mean_coverage: None,
+            target_coverage: None,
         }
     }
 }
