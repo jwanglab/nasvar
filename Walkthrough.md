@@ -9,15 +9,13 @@ This guide walks through setting up and running a complete nasvar analysis on a 
 - **bcftools** (optional): only needed if building a custom MAF sites file
 - **minimap2** (or similar): for aligning reads to the reference genome
 
-## 1. Build nasvar
+## 1. Build and install nasvar
 
 ```bash
 git clone https://github.com/jwanglab/nasvar
 cd nasvar
-cargo build --release
+cargo install --path .
 ```
-
-The binary is at `target/release/nasvar`. Add it to your PATH or use the full path below.
 
 ## 2. Obtain reference data
 
