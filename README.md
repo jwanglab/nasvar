@@ -18,6 +18,14 @@ A variant calling pipeline for long-read sequencing with adaptive sampling, with
 ```bash
 git clone https://github.com/jwanglab/nasvar
 cd nasvar
+cargo install --path .
+```
+
+This installs `nasvar` and `aggregate` to your Cargo bin directory (typically `~/.cargo/bin/`).
+
+Alternatively, build without installing:
+
+```bash
 cargo build --release
 ```
 
@@ -209,14 +217,20 @@ Provide centromere coordinates for all chromosomes (chr1-chr22, chrX, chrY).
 
 ### Logging
 
-Control log verbosity via the `RUST_LOG` environment variable:
-
 ```bash
-RUST_LOG=debug nasvar pipeline ...   # verbose
-RUST_LOG=warn nasvar pipeline ...    # warnings only
+nasvar --log-level debug pipeline ...          # verbose
+nasvar --log-level warn pipeline ...           # warnings only
+nasvar --log-file run.log pipeline ...         # log to file (truncates)
+nasvar --log-file run.log --append-log pipeline ...  # log to file (appends)
 ```
 
-Default level is `info`.
+| Option | Description |
+|--------|-------------|
+| `--log-level <LEVEL>` | Set log verbosity: `error`, `warn`, `info` (default), `debug`, `trace` |
+| `--log-file <PATH>` | Write logs to a file instead of stderr |
+| `--append-log` | Append to the log file instead of truncating it |
+
+These options are available on both `nasvar` and `aggregate`. The `RUST_LOG` environment variable is also supported for fine-grained control.
 
 ## Output Files
 

@@ -1,5 +1,5 @@
 use std::path::Path;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use log::{info, warn, error};
 
 #[global_allocator]
@@ -24,8 +24,38 @@ use nasvar::utils::annotation::PartnerGeneIndex;
     long_about = "A targeted variant caller for long-read sequencing with a focus on human tumor-only data, supporting SNVs, CNVs, fusions, and more."
 )]
 struct Cli {
+    /// Log verbosity level
+    #[arg(long, global = true, default_value = "info")]
+    log_level: LogLevel,
+    /// Write log output to a file instead of stderr
+    #[arg(long, global = true)]
+    log_file: Option<String>,
+    /// Append to log file instead of truncating
+    #[arg(long, global = true)]
+    append_log: bool,
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, ValueEnum)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    fn to_level_filter(&self) -> log::LevelFilter {
+        match self {
+            LogLevel::Error => log::LevelFilter::Error,
+            LogLevel::Warn => log::LevelFilter::Warn,
+            LogLevel::Info => log::LevelFilter::Info,
+            LogLevel::Debug => log::LevelFilter::Debug,
+            LogLevel::Trace => log::LevelFilter::Trace,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -342,10 +372,20 @@ fn main() {
     // -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .format_module_path(false)
-        .init();
+    let mut log_builder = env_logger::Builder::from_default_env();
+    log_builder
+        .filter_level(cli.log_level.to_level_filter())
+        .format_module_path(false);
+    if let Some(ref path) = cli.log_file {
+        let file = if cli.append_log {
+            std::fs::File::options().create(true).append(true).open(path)
+        } else {
+            std::fs::File::create(path)
+        }
+        .unwrap_or_else(|e| panic!("Could not open log file '{}': {}", path, e));
+        log_builder.target(env_logger::Target::Pipe(Box::new(file)));
+    }
+    log_builder.init();
 
     match &cli.command {
         Commands::Snv {

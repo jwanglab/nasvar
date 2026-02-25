@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use log::warn;
 use nasvar::config::AggregateConfig;
 use nasvar::output::{StructuralVariant, UnifiedOutput};
@@ -17,9 +17,39 @@ struct Cli {
     /// Path to aggregate configuration file (JSON). If not provided, uses defaults.
     #[arg(long)]
     config: Option<String>,
+    /// Log verbosity level
+    #[arg(long, default_value = "info")]
+    log_level: LogLevel,
+    /// Write log output to a file instead of stderr
+    #[arg(long)]
+    log_file: Option<String>,
+    /// Append to log file instead of truncating
+    #[arg(long)]
+    append_log: bool,
     /// Analysis output directories
     #[arg(required = true)]
     dirs: Vec<String>,
+}
+
+#[derive(Clone, ValueEnum)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    fn to_level_filter(&self) -> log::LevelFilter {
+        match self {
+            LogLevel::Error => log::LevelFilter::Error,
+            LogLevel::Warn => log::LevelFilter::Warn,
+            LogLevel::Info => log::LevelFilter::Info,
+            LogLevel::Debug => log::LevelFilter::Debug,
+            LogLevel::Trace => log::LevelFilter::Trace,
+        }
+    }
 }
 
 fn extract_sample_name(run_dir: &str) -> String {
@@ -462,10 +492,20 @@ fn build_columns(config: &AggregateConfig) -> Vec<String> {
 fn main() {
     let cli = Cli::parse();
 
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .format_module_path(false)
-        .init();
+    let mut log_builder = env_logger::Builder::from_default_env();
+    log_builder
+        .filter_level(cli.log_level.to_level_filter())
+        .format_module_path(false);
+    if let Some(ref path) = cli.log_file {
+        let file = if cli.append_log {
+            std::fs::File::options().create(true).append(true).open(path)
+        } else {
+            std::fs::File::create(path)
+        }
+        .unwrap_or_else(|e| panic!("Could not open log file '{}': {}", path, e));
+        log_builder.target(env_logger::Target::Pipe(Box::new(file)));
+    }
+    log_builder.init();
 
     let agg_config = match &cli.config {
         Some(path) => match AggregateConfig::load(path) {
