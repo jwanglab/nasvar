@@ -198,7 +198,7 @@ mkdir -p results/sample
 
 | Flag | Description |
 |------|-------------|
-| `--gc-correction loess` | Use LOESS instead of linear regression for GC bias correction (better for non-linear bias) |
+| `--gc-correction linear` | Use linear instead of LOESS for GC bias correction |
 | `--gc-correction none` | Skip GC correction entirely |
 | `--blast-ratio 0.5` | Override tumor fraction estimate (0.0-1.0); if omitted, estimated from the data |
 | `-f` / `--force` | Overwrite existing output files |
@@ -272,7 +272,7 @@ All sections except `version` and `timestamp` are present only if the correspond
 
 ### Diagnostic plots
 
-- **`gc_vs_coverage.svg`**: Check the scatter pattern. If the fitted line (linear) doesn't follow the data well, re-run with `--gc-correction loess`. The corrected plot (`gc_vs_coverage.gc_corrected.svg`) should show a flattened relationship.
+- **`gc_vs_coverage.svg`**: Check the scatter pattern. If the fitted line (LOESS) is causing artifacts, you can re-run with `--gc-correction none` or `linear`. The corrected plot (`gc_vs_coverage.gc_corrected.svg`) should show a flattened relationship.
 - **`karyotype.svg` vs `karyotype.gc_corrected.svg`**: Compare to verify GC correction improved the coverage uniformity across chromosome arms.
 
 ## 9. Running individual subcommands
@@ -292,8 +292,7 @@ nasvar karyotype \
   --maf results/sample/sample.maf \
   --out-prefix results/sample/sample \
   --config config/peds_leukemia_config.json \
-  --reference config/T2T-CHM13v2.0_reference.json \
-  --gc-correction loess
+  --reference config/T2T-CHM13v2.0_reference.json
 
 # Fusions only
 nasvar fusions --bam sample.bam --targets targets.bed --repeats repeats.bed \

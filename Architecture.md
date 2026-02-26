@@ -191,7 +191,7 @@ Breakpoint Consensus (optional, requires indexed BAM)
        │
        ▼
 Karyotype Analysis
-  ├── Two-pass GC bias correction (linear or LOESS, configurable via --gc-correction)
+  ├── Two-pass GC bias correction (linear, LOESS, or none, configurable via --gc-correction)
   ├── MAF-based ploidy estimation
   ├── SVG plots ({prefix}.karyotype*.svg, {prefix}.gc_vs_coverage*.svg)
   └── KaryotypeOutput + {prefix}.coverage.gc_adjusted.tsv
@@ -232,7 +232,7 @@ The entry point is `call_karyotype_gc_corrected`, which runs the full two-pass p
 #### Two-Pass Architecture
 
 - **Pass 1** (`call_karyotype` on raw coverage): Produces an initial karyotype estimate. This is needed to identify which chromosome arms are at majority ploidy (typically diploid), so the GC correction can be trained on segments with consistent copy number.
-- **GC bias correction** (`gc_correct_coverage`): Fits a regression model on majority-ploidy autosomal bins, then adjusts all bins. Outputs `{prefix}.coverage.gc_adjusted.tsv`. The correction method is controlled by `--gc-correction` (default: `linear`).
+- **GC bias correction** (`gc_correct_coverage`): Fits a regression model on majority-ploidy autosomal bins, then adjusts all bins. Outputs `{prefix}.coverage.gc_adjusted.tsv`. The correction method is controlled by `--gc-correction` (default: `loess`).
 - **Pass 2** (`call_karyotype` on corrected coverage): Re-runs the full karyotype inference on GC-adjusted coverage for the final result.
 
 When `--gc-correction none` is specified, GC correction is skipped entirely and Pass 1 results are returned directly.
@@ -243,8 +243,8 @@ The correction method is configurable via the `--gc-correction` CLI flag (`GcCor
 
 | Value | Method | Description |
 |-------|--------|-------------|
-| `linear` | Linear regression (default) | Fits `predicted = m * gc + b` on majority-ploidy bins |
-| `loess` | LOESS local regression | Non-parametric smooth fit; better for non-linear GC bias |
+| `linear` | Linear regression | Fits `predicted = m * gc + b` on majority-ploidy bins |
+| `loess` | LOESS local regression (default) | Non-parametric smooth fit; better for non-linear GC bias |
 | `none` | Disabled | Skips GC correction entirely |
 
 **Common steps (both methods):**

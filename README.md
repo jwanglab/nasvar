@@ -85,7 +85,7 @@ Runs all analyses in optimized order (parsing BAM/CRAM as few times as possible)
 
 ```
 nasvar pipeline <BAM> <REPEATS> <ENRICHED> <SITES> <TARGETS> <FASTA> <GFF> <OUT_PREFIX> \
-  --config <JSON> --reference <JSON> [--blast-ratio <FLOAT>] [-f]
+  --config <JSON> --reference <JSON> [-f]
 ```
 
 ### `nasvar snv`

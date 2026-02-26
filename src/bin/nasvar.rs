@@ -135,7 +135,7 @@ enum Commands {
         #[arg(long, required = true)]
         reference: String,
         /// GC bias correction method for karyotype inference.
-        #[arg(long, value_enum, default_value_t = nasvar::karyotype::GcCorrectionMethod::Linear)]
+        #[arg(long, value_enum, default_value_t = nasvar::karyotype::GcCorrectionMethod::Loess)]
         gc_correction: nasvar::karyotype::GcCorrectionMethod,
     },
     /// Call Gene Fusions
