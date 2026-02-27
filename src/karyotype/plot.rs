@@ -92,6 +92,7 @@ pub fn plot_karyotype(
     let mut tick_labels: Vec<String> = Vec::new();
 
     let mut x = 0.0;
+    let mut seg_p95s: Vec<f64> = Vec::new();
     for &seg in SEGMENT_ORDER {
         let vals = match seg_bins.get(seg) {
             Some(v) if !v.is_empty() => v,
@@ -109,6 +110,8 @@ pub fn plot_karyotype(
         let mut sorted = vals.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let med = sorted[sorted.len() / 2];
+        let p95 = sorted[(sorted.len() as f64 * 0.95) as usize];  
+        seg_p95s.push(p95);
         median_x_start.push(seg_start);
         median_x_end.push(seg_end);
         median_y.push(med);
@@ -129,7 +132,7 @@ pub fn plot_karyotype(
     // Y-limit: 95th percentile
     let mut sorted_y = all_y.clone();
     sorted_y.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let y_max = sorted_y[(sorted_y.len() as f64 * 0.99) as usize].max(1.0);
+    let y_max = seg_p95s.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1.0);
     let x_max = x;
 
     let mut fig = Figure::new(1600.0, 500.0);
@@ -354,6 +357,8 @@ pub fn plot_karyotype_with_baf(
     let mut median_x_end: Vec<f64> = Vec::new();
     let mut median_y: Vec<f64> = Vec::new();
 
+    let mut seg_p95s: Vec<f64> = Vec::new();
+
     for (seg, seg_start, n) in &layout.seg_ranges {
         let vals = &seg_bins[seg];
         for (i, &cov) in vals.iter().enumerate() {
@@ -367,6 +372,8 @@ pub fn plot_karyotype_with_baf(
         median_x_start.push(*seg_start);
         median_x_end.push(seg_end);
         median_y.push(med);
+        let p95 = sorted[(sorted.len() as f64 * 0.95) as usize];  
+        seg_p95s.push(p95);
     }
 
     // Collect BAF scatter data using same segment layout
@@ -393,7 +400,8 @@ pub fn plot_karyotype_with_baf(
     // Y-limit for coverage: 95th percentile
     let mut sorted_y = cov_y.clone();
     sorted_y.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let y_max = sorted_y[(sorted_y.len() as f64 * 0.99) as usize].max(1.0);
+    let y_max = seg_p95s.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1.0);
+    println!("y_max: {}", y_max);
 
     let mut fig = Figure::new(1600.0, 700.0);
     fig = fig.suptitle(title);

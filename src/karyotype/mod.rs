@@ -387,10 +387,11 @@ fn get_segment_from_pos(chrom: &str, pos: u32, ref_config: &ReferenceConfig) -> 
     get_segment(chrom, pos, pos, ref_config)
 }
 
-pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig) -> Result<HashMap<String, Vec<f64>>, Box<dyn std::error::Error>> {
+pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig) -> Result<(HashMap<String, Vec<f64>>, HashMap<String, usize>), Box<dyn std::error::Error>> {
     let file = File::open(maf_path)?;
     let reader = BufReader::new(file);
     let mut mafs: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut maf_counts: HashMap<String, usize> = HashMap::new();
 
     for line in reader.lines() {
         let l = line?;
@@ -398,8 +399,6 @@ pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig) -> Result<HashMap
             continue;
         }
         let parts: Vec<&str> = l.split('\t').collect();
-        // chrom pos major minor (count) -> or ref alt major minor ?
-        // file format: chrom pos major minor ...
         if parts.len() < 4 {
             continue;
         }
@@ -415,14 +414,16 @@ pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig) -> Result<HashMap
         }
         let maf = ref_ct.min(alt_ct) / total;
 
-        if maf > 0.1 {
-            // MAF > 0.1 threshold filters out homozygous sites
-            if let Some(segment) = get_segment_from_pos(&chrom, pos, ref_config) {
+        if let Some(segment) = get_segment_from_pos(&chrom, pos, ref_config) {
+            // Always count all valid MAF data points per segment
+            *maf_counts.entry(segment.clone()).or_insert(0) += 1;
+
+            if maf > 0.1 {
                 mafs.entry(segment).or_default().push(maf);
             }
         }
     }
-    Ok(mafs)
+    Ok((mafs, maf_counts))
 }
 
 /// Parse MAF file returning BAF (alt / (ref+alt)) values grouped by segment for plotting.
@@ -892,18 +893,19 @@ pub fn call_karyotype(
         }
     }
 
+
     // Process MAF
     let mut levels_maf_peaks: Option<HashMap<usize, f64>> = None;
     if let Some(mp) = maf_path {
-        let maf_data = parse_maf(mp, ref_config)?;
+        let (maf_data, maf_counts) = parse_maf(mp, ref_config)?;
         if !maf_data.is_empty() {
-            // Check sufficiency: count segments with >1% MAF density
+            // Count segments with >1% MAF density; all callable site
             let maf_sufficient = if let Some(sb) = seg_bases {
                 let mut sufficient_segs = 0;
-                for (seg, data) in &maf_data {
+                for (seg, &count) in &maf_counts {
                     if let Some(&bases) = sb.get(seg) {
                         if bases > 0 {
-                            let ratio = data.len() as f64 / bases as f64;
+                            let ratio = count as f64 / bases as f64;
                             if ratio > 0.01 {
                                 sufficient_segs += 1;
                             }
