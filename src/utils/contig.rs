@@ -65,6 +65,9 @@ impl Default for ContigMapper {
     }
 }
 
+/// Number of canonical chromosomes (chr1-22, chrX, chrY).
+pub const NUM_CHROMOSOMES: usize = CHR_NAMES.len();
+
 impl ContigMapper {
     /// Create a new ContigMapper with T2T-CHM13v2.0 mappings.
     pub fn new() -> Self {
@@ -134,9 +137,10 @@ impl ContigMapper {
         }
 
         // If we find at least half the canonical chromosomes in one convention
-        if chr_count >= 12 && chr_count > acc_count {
+        let half = NUM_CHROMOSOMES / 2;
+        if chr_count >= half && chr_count > acc_count {
             NamingConvention::ChrNames
-        } else if acc_count >= 12 && acc_count > chr_count {
+        } else if acc_count >= half && acc_count > chr_count {
             NamingConvention::Accession
         } else if chr_count > 0 && acc_count == 0 {
             NamingConvention::ChrNames
@@ -244,13 +248,34 @@ impl ContigMapper {
     }
 
     /// Get all T2T accession IDs.
-    pub fn t2t_accessions() -> &'static [&'static str; 24] {
+    pub fn t2t_accessions() -> &'static [&'static str; NUM_CHROMOSOMES] {
         &T2T_ACCESSIONS
     }
 
     /// Get all chromosome names.
-    pub fn chr_names() -> &'static [&'static str; 24] {
+    pub fn chr_names() -> &'static [&'static str; NUM_CHROMOSOMES] {
         &CHR_NAMES
+    }
+
+    /// Map a bare chromosome string to a canonical index (0-23).
+    ///
+    /// Accepts "1"-"22", "X", "Y" as well as "chr1"-"chr22", "chrX", "chrY".
+    /// Returns `None` for unrecognized names. This is a lightweight static
+    /// method that doesn't require a ContigMapper instance.
+    pub fn parse_chr_index(name: &str) -> Option<usize> {
+        let bare = name.strip_prefix("chr").unwrap_or(name);
+        match bare {
+            "X" => Some(NUM_CHROMOSOMES - 2),
+            "Y" => Some(NUM_CHROMOSOMES - 1),
+            n => {
+                let num: usize = n.parse().ok()?;
+                if num >= 1 && num <= NUM_CHROMOSOMES - 2 {
+                    Some(num - 1)
+                } else {
+                    None
+                }
+            }
+        }
     }
 }
 
@@ -332,5 +357,26 @@ mod tests {
         assert!(mapper.exists_in_bam("chr1"));
         // Non-existent
         assert!(!mapper.exists_in_bam("chrM"));
+    }
+
+    #[test]
+    fn test_parse_chr_index() {
+        // Bare numbers
+        assert_eq!(ContigMapper::parse_chr_index("1"), Some(0));
+        assert_eq!(ContigMapper::parse_chr_index("22"), Some(21));
+        assert_eq!(ContigMapper::parse_chr_index("X"), Some(22));
+        assert_eq!(ContigMapper::parse_chr_index("Y"), Some(23));
+
+        // With chr prefix
+        assert_eq!(ContigMapper::parse_chr_index("chr1"), Some(0));
+        assert_eq!(ContigMapper::parse_chr_index("chrX"), Some(22));
+        assert_eq!(ContigMapper::parse_chr_index("chrY"), Some(23));
+
+        // Out of range / invalid
+        assert_eq!(ContigMapper::parse_chr_index("0"), None);
+        assert_eq!(ContigMapper::parse_chr_index("23"), None);
+        assert_eq!(ContigMapper::parse_chr_index("M"), None);
+        assert_eq!(ContigMapper::parse_chr_index("chrM"), None);
+        assert_eq!(ContigMapper::parse_chr_index("unknown"), None);
     }
 }

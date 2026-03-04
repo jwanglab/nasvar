@@ -13,7 +13,7 @@ use nasvar::var::cnv::{call_cnvs, CnvCallParams};
 use nasvar::var::coverage::read_depth;
 use nasvar::var::fusions::{call_fusions, FusionCallParams};
 use nasvar::var::itd;
-use nasvar::var::maf::{calc_maf, read_sites};
+use nasvar::var::maf::{calc_maf, filter_repeat_sites, read_sites};
 use nasvar::var::snv::call_snvs;
 use nasvar::utils::annotation::PartnerGeneIndex;
 
@@ -137,6 +137,12 @@ enum Commands {
         /// GC bias correction method for karyotype inference.
         #[arg(long, value_enum, default_value_t = nasvar::karyotype::GcCorrectionMethod::Loess)]
         gc_correction: nasvar::karyotype::GcCorrectionMethod,
+        /// Minimum read depth at a MAF site for BAF plotting (sites below this are spacers).
+        #[arg(long, default_value_t = 20)]
+        min_depth: u32,
+        /// Per-segment percentile for karyotype plot y-axis limit (0.0-1.0).
+        #[arg(long, default_value_t = 0.95)]
+        plot_y_percentile: f64,
     },
     /// Call Gene Fusions
     Fusions {
@@ -240,6 +246,12 @@ enum Commands {
         /// GC bias correction method for karyotype inference.
         #[arg(long, value_enum, default_value_t = nasvar::karyotype::GcCorrectionMethod::Linear)]
         gc_correction: nasvar::karyotype::GcCorrectionMethod,
+        /// Minimum read depth at a MAF site for BAF plotting (sites below this are spacers).
+        #[arg(long, default_value_t = 20)]
+        min_depth: u32,
+        /// Per-segment percentile for karyotype plot y-axis limit (0.0-1.0).
+        #[arg(long, default_value_t = 0.95)]
+        plot_y_percentile: f64,
     },
     /// Call Internal Tandem Duplications (ITDs)
     Itd {
@@ -520,6 +532,8 @@ fn main() {
             config,
             reference,
             gc_correction,
+            min_depth,
+            plot_y_percentile,
         } => {
             if let Err(e) = check_output_paths(out_prefix, &[".result.json"], *force) {
                 error!("{}", e);
@@ -542,7 +556,11 @@ fn main() {
                 }
             };
 
-            match nasvar::karyotype::call_karyotype_gc_corrected(coverage, maf.as_deref(), out_prefix, None, &ref_config, &pipeline_config.thresholds.karyotype, *gc_correction, None) {
+            let mut karyo_thresholds = pipeline_config.thresholds.karyotype.clone();
+            karyo_thresholds.min_depth = *min_depth;
+            karyo_thresholds.plot_y_percentile = *plot_y_percentile;
+
+            match nasvar::karyotype::call_karyotype_gc_corrected(coverage, maf.as_deref(), out_prefix, None, &ref_config, &karyo_thresholds, *gc_correction, None) {
                 Ok(karyo_output) => {
                     let collector = OutputCollector::new().with_karyotype(karyo_output);
                     if let Err(e) = collector.write_to_prefix(out_prefix) {
@@ -755,6 +773,8 @@ fn main() {
             config,
             reference,
             gc_correction,
+            min_depth,
+            plot_y_percentile,
         } => {
             let mut timer = StepTimer::new();
 
@@ -797,13 +817,14 @@ fn main() {
                     return;
                 }
             };
-            let s_vec = match read_sites(sites) {
+            let mut s_vec = match read_sites(sites) {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Error reading sites: {}", e);
                     return;
                 }
             };
+            filter_repeat_sites(&mut s_vec, &r_vec);
             let t_vec = match read_bed(targets) {
                 Ok(v) => v,
                 Err(e) => {
@@ -901,13 +922,16 @@ fn main() {
             // Karyotype (two-pass with GC bias correction)
             timer.start("Karyotype Analysis");
             let seg_bases = nasvar::karyotype::compute_seg_bases(&s_vec, &e_vec, &ref_config);
+            let mut karyo_thresholds = pipeline_config.thresholds.karyotype.clone();
+            karyo_thresholds.min_depth = *min_depth;
+            karyo_thresholds.plot_y_percentile = *plot_y_percentile;
             let (karyo_result, est_blast_ratio) = match nasvar::karyotype::call_karyotype_gc_corrected(
                 &cov_file,
                 Some(&maf_file),
                 out_prefix,
                 reads_aligned,
                 &ref_config,
-                &pipeline_config.thresholds.karyotype,
+                &karyo_thresholds,
                 *gc_correction,
                 Some(&seg_bases),
             ) {

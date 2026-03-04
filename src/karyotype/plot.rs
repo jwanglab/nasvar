@@ -72,6 +72,7 @@ pub fn plot_karyotype(
     ref_config: &ReferenceConfig,
     out_path: &str,
     title: &str,
+    y_percentile: f64,
 ) {
     // Group bins by segment
     let mut seg_bins: HashMap<String, Vec<f64>> = HashMap::new();
@@ -92,7 +93,7 @@ pub fn plot_karyotype(
     let mut tick_labels: Vec<String> = Vec::new();
 
     let mut x = 0.0;
-    let mut seg_p95s: Vec<f64> = Vec::new();
+    let mut seg_pcts: Vec<f64> = Vec::new();
     for &seg in SEGMENT_ORDER {
         let vals = match seg_bins.get(seg) {
             Some(v) if !v.is_empty() => v,
@@ -106,12 +107,12 @@ pub fn plot_karyotype(
         }
         let seg_end = x + (vals.len() - 1) as f64;
 
-        // Median
+        // Median and percentile
         let mut sorted = vals.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let med = sorted[sorted.len() / 2];
-        let p95 = sorted[(sorted.len() as f64 * 0.95) as usize];  
-        seg_p95s.push(p95);
+        let pct_val = sorted[(sorted.len() as f64 * y_percentile) as usize];
+        seg_pcts.push(pct_val);
         median_x_start.push(seg_start);
         median_x_end.push(seg_end);
         median_y.push(med);
@@ -129,10 +130,8 @@ pub fn plot_karyotype(
         return;
     }
 
-    // Y-limit: 95th percentile
-    let mut sorted_y = all_y.clone();
-    sorted_y.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let y_max = seg_p95s.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1.0);
+    // Y-limit: max of per-segment percentiles
+    let y_max = seg_pcts.iter().cloned().fold(1.0_f64, f64::max);
     let x_max = x;
 
     let mut fig = Figure::new(1600.0, 500.0);
@@ -338,10 +337,11 @@ fn layout_segments(
 /// Two-panel plot: top = GC-corrected coverage, bottom = B-allele frequency.
 pub fn plot_karyotype_with_baf(
     bins: &[CoverageBin],
-    baf_by_segment: &HashMap<String, Vec<f64>>,
+    baf_by_segment: &HashMap<String, Vec<Option<f64>>>,
     ref_config: &ReferenceConfig,
     out_path: &str,
     title: &str,
+    y_percentile: f64,
 ) {
     let (layout, seg_bins) = layout_segments(bins, ref_config);
 
@@ -356,8 +356,7 @@ pub fn plot_karyotype_with_baf(
     let mut median_x_start: Vec<f64> = Vec::new();
     let mut median_x_end: Vec<f64> = Vec::new();
     let mut median_y: Vec<f64> = Vec::new();
-
-    let mut seg_p95s: Vec<f64> = Vec::new();
+    let mut seg_pcts: Vec<f64> = Vec::new();
 
     for (seg, seg_start, n) in &layout.seg_ranges {
         let vals = &seg_bins[seg];
@@ -372,36 +371,37 @@ pub fn plot_karyotype_with_baf(
         median_x_start.push(*seg_start);
         median_x_end.push(seg_end);
         median_y.push(med);
-        let p95 = sorted[(sorted.len() as f64 * 0.95) as usize];  
-        seg_p95s.push(p95);
+        let pct_val = sorted[(sorted.len() as f64 * y_percentile) as usize];
+        seg_pcts.push(pct_val);
     }
 
-    // Collect BAF scatter data using same segment layout
+    // Collect BAF scatter data using same segment layout.
+    // All sites (including None spacers) contribute to x-spacing;
+    // only Some(baf) sites are actually rendered.
     let mut baf_x: Vec<f64> = Vec::new();
     let mut baf_y: Vec<f64> = Vec::new();
 
     for (seg, seg_start, _n) in &layout.seg_ranges {
         if let Some(bafs) = baf_by_segment.get(seg) {
-            for (i, &b) in bafs.iter().enumerate() {
-                // Spread BAF points evenly across the segment width
-                let n_sites = bafs.len();
-                let seg_width = seg_bins.get(seg).map(|v| v.len() as f64 - 1.0).unwrap_or(1.0).max(1.0);
-                let x_pos = if n_sites > 1 {
-                    seg_start + (i as f64 / (n_sites - 1) as f64) * seg_width
-                } else {
-                    seg_start + seg_width / 2.0
-                };
-                baf_x.push(x_pos);
-                baf_y.push(b);
+            let n_sites = bafs.len(); // includes spacers
+            let seg_width = seg_bins.get(seg).map(|v| v.len() as f64 - 1.0).unwrap_or(1.0).max(1.0);
+            for (i, baf_opt) in bafs.iter().enumerate() {
+                if let Some(&b) = baf_opt.as_ref() {
+                    let x_pos = if n_sites > 1 {
+                        seg_start + (i as f64 / (n_sites - 1) as f64) * seg_width
+                    } else {
+                        seg_start + seg_width / 2.0
+                    };
+                    baf_x.push(x_pos);
+                    baf_y.push(b);
+                }
+                // None spacers: skip rendering but still counted in n_sites for spacing
             }
         }
     }
 
-    // Y-limit for coverage: 95th percentile
-    let mut sorted_y = cov_y.clone();
-    sorted_y.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let y_max = seg_p95s.iter().cloned().fold(f64::NEG_INFINITY, f64::max).max(1.0);
-    println!("y_max: {}", y_max);
+    // Y-limit for coverage: max of per-segment percentiles
+    let y_max = seg_pcts.iter().cloned().fold(1.0_f64, f64::max);
 
     let mut fig = Figure::new(1600.0, 700.0);
     fig = fig.suptitle(title);

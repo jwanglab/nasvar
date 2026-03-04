@@ -230,12 +230,17 @@ pub struct KaryotypeThresholds {
     pub maf_peak_diploid: f64,
     #[serde(default = "default_min_maf_sites")]
     pub min_maf_sites: usize,
+    #[serde(default = "default_min_depth")]
+    pub min_depth: u32,
+    #[serde(default = "default_plot_y_percentile")]
+    pub plot_y_percentile: f64,
 }
 
 fn default_spread_warning() -> f64 { 0.08 }
 fn default_level_tolerance() -> f64 { 0.3 }
 fn default_maf_peak_diploid() -> f64 { 0.4 }
 fn default_min_maf_sites() -> usize { 50 }
+fn default_plot_y_percentile() -> f64 { 0.95 }
 
 /// All threshold configurations
 #[derive(Deserialize, Debug, Clone)]
@@ -312,6 +317,8 @@ impl Default for KaryotypeThresholds {
             level_tolerance: default_level_tolerance(),
             maf_peak_diploid: default_maf_peak_diploid(),
             min_maf_sites: default_min_maf_sites(),
+            min_depth: default_min_depth(),
+            plot_y_percentile: default_plot_y_percentile(),
         }
     }
 }

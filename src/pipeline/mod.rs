@@ -1,5 +1,6 @@
 use log::info;
 use crate::bam::ContigMapper;
+use crate::utils::contig::NUM_CHROMOSOMES;
 use crate::input::{AlignmentInput, AlignmentHeader, AlignmentRecord, CigarKind};
 use crate::config::PipelineConfig;
 use crate::output::{OutputCollector, FusionsOutput, UnifiedOutput};
@@ -274,7 +275,6 @@ use crate::utils::metadata::extract_from_header as extract_metadata_from_header;
 pub struct MafAccumulator {
     sites: Vec<Vec<Site>>,
     counts: Vec<Vec<[u32; 5]>>,
-    min_depth: u32,
 }
 
 impl MafAccumulator {
@@ -282,9 +282,9 @@ impl MafAccumulator {
         let mut sites_by_ref = vec![Vec::new(); header.refs.len()];
         let mut counts = vec![Vec::new(); header.refs.len()];
 
-        // Map sites (indexed 0-23 for chr1-22,X,Y) to BAM ref_ids.
+        // Map sites (indexed by canonical chromosome) to BAM ref_ids.
         // Support both NC_* accession and chr* naming conventions.
-        for i in 0..24 {
+        for i in 0..NUM_CHROMOSOMES {
             let acc = ContigMapper::accession_from_index(i).unwrap();
             let chr = ContigMapper::chr_name_from_index(i).unwrap();
             let ref_id = header.refs.iter().position(|r| r == acc)
@@ -299,7 +299,6 @@ impl MafAccumulator {
         Self {
             sites: sites_by_ref,
             counts,
-            min_depth: 20,
         }
     }
 
@@ -380,9 +379,7 @@ impl MafAccumulator {
                 let cnt = self.counts[id][i];
                 let ref_ct = cnt[site.al0 as usize];
                 let alt_ct = cnt[site.al1 as usize];
-                if ref_ct + alt_ct >= self.min_depth {
-                    writeln!(file, "{}\t{}\t{}\t{}", name, site.pos, ref_ct, alt_ct)?;
-                }
+                writeln!(file, "{}\t{}\t{}\t{}", name, site.pos, ref_ct, alt_ct)?;
             }
         }
         Ok(())

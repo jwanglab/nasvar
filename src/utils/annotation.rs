@@ -79,8 +79,8 @@ pub fn get_gene_annotation_from_reader<R: BufRead>(gene_name: &str, reader: R, t
         let info = parts[8];
 
         if feat_type == "gene" {
-            // Check Name=...
-            if info.contains(&format!("Name={}", gene_name)) {
+            // Check Name=... (exact match to avoid e.g. IDH1-AS1 matching IDH1)
+            if get_gff_attribute_values(info, "Name").contains(&gene_name) {
                 // Found it
                 chrom = Some(parts[0].to_string());
                 strand = Some(Strand::from_char(parts[6].chars().next().unwrap_or('.')));

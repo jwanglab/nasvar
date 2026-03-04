@@ -2,6 +2,7 @@ mod plot;
 
 use log::{info, warn, debug};
 use crate::bam::ContigMapper;
+use crate::utils::contig::NUM_CHROMOSOMES;
 use crate::config::{KaryotypeThresholds, ReferenceConfig};
 use crate::output::KaryotypeOutput;
 use crate::var::maf::Site;
@@ -387,7 +388,7 @@ fn get_segment_from_pos(chrom: &str, pos: u32, ref_config: &ReferenceConfig) -> 
     get_segment(chrom, pos, pos, ref_config)
 }
 
-pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig) -> Result<(HashMap<String, Vec<f64>>, HashMap<String, usize>), Box<dyn std::error::Error>> {
+pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig, min_depth: u32) -> Result<(HashMap<String, Vec<f64>>, HashMap<String, usize>), Box<dyn std::error::Error>> {
     let file = File::open(maf_path)?;
     let reader = BufReader::new(file);
     let mut mafs: HashMap<String, Vec<f64>> = HashMap::new();
@@ -409,7 +410,7 @@ pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig) -> Result<(HashMa
         let alt_ct: f64 = parts[3].parse().unwrap_or(0.0);
 
         let total = ref_ct + alt_ct;
-        if total == 0.0 {
+        if total < min_depth as f64 {
             continue;
         }
         let maf = ref_ct.min(alt_ct) / total;
@@ -427,11 +428,13 @@ pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig) -> Result<(HashMa
 }
 
 /// Parse MAF file returning BAF (alt / (ref+alt)) values grouped by segment for plotting.
-/// No threshold filter — all sites that passed depth in calc_maf are included.
-pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig) -> Result<HashMap<String, Vec<f64>>, Box<dyn std::error::Error>> {
+/// Sites with depth >= min_depth get `Some(baf)`. Sub-threshold sites get `None` (spacer —
+/// they occupy x-axis space in the plot but no point is rendered).
+pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_depth: u32) -> Result<HashMap<String, Vec<Option<f64>>>, Box<dyn std::error::Error>> {
     let file = File::open(maf_path)?;
     let reader = BufReader::new(file);
-    let mut bafs: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut bafs: HashMap<String, Vec<Option<f64>>> = HashMap::new();
+    let min_depth_f = min_depth as f64;
 
     for line in reader.lines() {
         let l = line?;
@@ -449,13 +452,14 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig) -> Resul
         let alt_ct: f64 = parts[3].parse().unwrap_or(0.0);
 
         let total = ref_ct + alt_ct;
-        if total == 0.0 {
-            continue;
-        }
-        let baf = alt_ct / total;
+        let value = if total >= min_depth_f {
+            Some(alt_ct / total)
+        } else {
+            None // spacer
+        };
 
         if let Some(segment) = get_segment_from_pos(&chrom, pos, ref_config) {
-            bafs.entry(segment).or_default().push(baf);
+            bafs.entry(segment).or_default().push(value);
         }
     }
     Ok(bafs)
@@ -809,10 +813,10 @@ pub fn compute_seg_bases(
     let mapper = ContigMapper::new();
 
     // Group enriched intervals by chromosome index
-    let mut bed_by_idx: Vec<Vec<(u32, u32)>> = vec![Vec::new(); 24];
+    let mut bed_by_idx: Vec<Vec<(u32, u32)>> = vec![Vec::new(); NUM_CHROMOSOMES];
     for region in enriched {
         if let Some(idx) = mapper.get_chr_index(&region.segment) {
-            if idx < 24 {
+            if idx < NUM_CHROMOSOMES {
                 bed_by_idx[idx].push((region.start, region.end));
             }
         }
@@ -821,7 +825,7 @@ pub fn compute_seg_bases(
     let mut seg_counts: HashMap<String, usize> = HashMap::new();
 
     for (idx, chr_sites) in sites.iter().enumerate() {
-        if idx >= 24 { break; }
+        if idx >= NUM_CHROMOSOMES { break; }
         let chrom = match ContigMapper::chr_name_from_index(idx) {
             Some(name) => name,
             None => continue,
@@ -897,7 +901,7 @@ pub fn call_karyotype(
     // Process MAF
     let mut levels_maf_peaks: Option<HashMap<usize, f64>> = None;
     if let Some(mp) = maf_path {
-        let (maf_data, maf_counts) = parse_maf(mp, ref_config)?;
+        let (maf_data, maf_counts) = parse_maf(mp, ref_config, thresholds.min_depth)?;
         if !maf_data.is_empty() {
             // Count segments with >1% MAF density; all callable site
             let maf_sufficient = if let Some(sb) = seg_bases {
@@ -1693,9 +1697,11 @@ pub fn call_karyotype_gc_corrected(
     // Parse bins (with GC content)
     let bins = parse_coverage(cov_path)?;
 
+    let y_pct = thresholds.plot_y_percentile;
+
     // Plot pre-correction karyotype
     let pre_plot_path = format!("{}.karyotype.svg", out_prefix);
-    plot::plot_karyotype(&bins, ref_config, &pre_plot_path, "Karyotype (raw)");
+    plot::plot_karyotype(&bins, ref_config, &pre_plot_path, "Karyotype (raw)", y_pct);
 
     // Apply GC correction
     info!("=== GC Correction ({:?}): Adjusting coverage ===", gc_correction);
@@ -1727,16 +1733,16 @@ pub fn call_karyotype_gc_corrected(
 
     // Plot post-correction karyotype
     let post_plot_path = format!("{}.karyotype.gc_corrected.svg", out_prefix);
-    plot::plot_karyotype(&corrected_bins, ref_config, &post_plot_path, "Karyotype (GC corrected)");
+    plot::plot_karyotype(&corrected_bins, ref_config, &post_plot_path, "Karyotype (GC corrected)", y_pct);
 
     // Plot combined karyotype + BAF
     if let Some(maf_p) = maf_path {
-        match parse_maf_for_plot(maf_p, ref_config) {
+        match parse_maf_for_plot(maf_p, ref_config, thresholds.min_depth) {
             Ok(baf_data) => {
                 let combined_path = format!("{}.karyotype_baf.gc_corrected.svg", out_prefix);
                 plot::plot_karyotype_with_baf(
                     &corrected_bins, &baf_data, ref_config,
-                    &combined_path, "Karyotype + BAF (GC corrected)",
+                    &combined_path, "Karyotype + BAF (GC corrected)", y_pct,
                 );
             }
             Err(e) => warn!("Could not parse MAF for BAF plot: {}", e),

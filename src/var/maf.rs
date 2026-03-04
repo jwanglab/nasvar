@@ -1,5 +1,6 @@
 use crate::input::{AlignmentInput, CigarKind};
 use crate::utils::bed::BedRegion;
+use crate::utils::contig::{ContigMapper, NUM_CHROMOSOMES};
 use log::debug;
 use std::collections::HashMap;
 use std::fs::File;
@@ -13,7 +14,7 @@ pub struct Site {
 }
 
 pub fn read_sites(path: &str) -> Result<Vec<Vec<Site>>, Box<dyn std::error::Error>> {
-    let mut sites = vec![Vec::new(); 24]; // 1-22, X, Y
+    let mut sites = vec![Vec::new(); NUM_CHROMOSOMES];
     let file = File::open(path).map_err(|e| {
         std::io::Error::other(format!("Error opening sites file {}: {}", path, e))
     })?;
@@ -26,28 +27,12 @@ pub fn read_sites(path: &str) -> Result<Vec<Vec<Site>>, Box<dyn std::error::Erro
             continue;
         }
 
-        let chrom_str = p[0];
-        let chrom = chrom_str.strip_prefix("chr").unwrap_or(chrom_str);
+        let idx = match ContigMapper::parse_chr_index(p[0]) {
+            Some(i) => i,
+            None => continue,
+        };
 
         let pos: usize = p[1].parse()?;
-
-        // Map chrom to index 0-23
-        let idx = if chrom == "X" {
-            22
-        } else if chrom == "Y" {
-            23
-        } else {
-            match chrom.parse::<usize>() {
-                Ok(n) => {
-                    if n > 0 && n <= 22 {
-                        n - 1
-                    } else {
-                        continue;
-                    }
-                }
-                Err(_) => continue,
-            }
-        };
 
         // Parse alleles A,C,G,T -> 0,1,2,3
         let a0 = match p[2] {
@@ -76,6 +61,39 @@ pub fn read_sites(path: &str) -> Result<Vec<Vec<Site>>, Box<dyn std::error::Erro
     Ok(sites)
 }
 
+/// Remove sites that fall within repeat/masked BED regions.
+pub fn filter_repeat_sites(sites: &mut Vec<Vec<Site>>, repeats: &[BedRegion]) {
+    let mapper = ContigMapper::new();
+
+    // Group repeat intervals by chromosome index, sorted by start
+    let mut repeats_by_chr: Vec<Vec<(usize, usize)>> = vec![Vec::new(); NUM_CHROMOSOMES];
+    for r in repeats {
+        if let Some(idx) = mapper.get_chr_index(&r.segment) {
+            if idx < NUM_CHROMOSOMES {
+                repeats_by_chr[idx].push((r.start as usize, r.end as usize));
+            }
+        }
+    }
+    for intervals in &mut repeats_by_chr {
+        intervals.sort_unstable();
+    }
+
+    for (chr_idx, chr_sites) in sites.iter_mut().enumerate() {
+        if chr_idx >= NUM_CHROMOSOMES { break; }
+        let intervals = &repeats_by_chr[chr_idx];
+        if intervals.is_empty() { continue; }
+        chr_sites.retain(|site| {
+            // Binary search: find the last interval whose start <= site.pos
+            let i = intervals.partition_point(|&(start, _)| start <= site.pos);
+            if i == 0 {
+                return true; // site is before all intervals
+            }
+            let (_, end) = intervals[i - 1];
+            site.pos >= end // keep if site is at or past the end of the interval
+        });
+    }
+}
+
 pub fn calc_maf(
     bam: &mut AlignmentInput,
     enriched: &[BedRegion],
@@ -89,8 +107,6 @@ pub fn calc_maf(
     let out_maf = format!("{}.maf", out_prefix);
     let mut file = File::create(out_maf)?;
     writeln!(file, "chrom\tpos\tref\talt")?;
-
-    let min_depth = 20;
 
     let mut current_chrom = String::new();
 
@@ -170,18 +186,16 @@ pub fn calc_maf(
             }
         }
 
-        // Write results
+        // Write results (all sites, including sub-threshold)
         for site in &target_sites {
             if let Some(cnt) = counts.get(&site.pos) {
                 let ref_ct = cnt[site.al0 as usize];
                 let alt_ct = cnt[site.al1 as usize];
-                if ref_ct + alt_ct >= min_depth {
-                    writeln!(
-                        file,
-                        "{}\t{}\t{}\t{}",
-                        target.segment, site.pos, ref_ct, alt_ct
-                    )?;
-                }
+                writeln!(
+                    file,
+                    "{}\t{}\t{}\t{}",
+                    target.segment, site.pos, ref_ct, alt_ct
+                )?;
             }
         }
     }
