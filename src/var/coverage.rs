@@ -325,26 +325,70 @@ pub fn read_depth(
     bam: &mut AlignmentInput,
     repeats: &[BedRegion],
     out_prefix: &str,
+    as_alignments: Option<&str>,
 ) -> Result<u64, Box<dyn std::error::Error>>
 {
     info!("Calculating coverage...");
 
-    // Create accumulator (no reference = no GC content)
-    let mut accumulator = CoverageAccumulator::new(&bam.header, repeats, None);
+    let out_file = format!("{}.coverage.tsv", out_prefix);
 
-    // Single-pass BAM scan
-    bam.seek(bam.start_pos)?;
+    if let Some(as_path) = as_alignments {
+        // Use adaptive sampling alignments exclusively for coverage
+        let accumulator = scan_as_alignments(as_path, &bam.header, repeats, None)?;
+        accumulator.write_output(&out_file, false)?;
+        let reads_aligned = accumulator.reads_aligned();
+        info!("Total aligned reads (primary, from AS): {}", reads_aligned);
+        Ok(reads_aligned)
+    } else {
+        // Standard: scan main BAM for coverage
+        let mut accumulator = CoverageAccumulator::new(&bam.header, repeats, None);
+        bam.seek(bam.start_pos)?;
+        while let Some(record) = bam.read_record()? {
+            accumulator.process(&record);
+        }
+        accumulator.write_output(&out_file, false)?;
+        let reads_aligned = accumulator.reads_aligned();
+        info!("Total aligned reads (primary): {}", reads_aligned);
+        Ok(reads_aligned)
+    }
+}
 
-    while let Some(record) = bam.read_record()? {
+/// Scan an adaptive sampling alignment file (SAM/BAM/CRAM) for coverage,
+/// creating and returning a new CoverageAccumulator.
+///
+/// Used when --as-alignments is provided to replace the main BAM for
+/// coverage/karyotyping. The file does not need to be sorted or indexed.
+/// Its reference sequences must match the primary BAM header.
+pub fn scan_as_alignments(
+    path: &str,
+    bam_header: &AlignmentHeader,
+    repeats: &[BedRegion],
+    ref_path: Option<&str>,
+) -> Result<CoverageAccumulator, Box<dyn std::error::Error>>
+{
+    info!("Scanning adaptive sampling alignments: {}", path);
+
+    let mut input = AlignmentInput::open(path, None)?;
+
+    // Validate reference sequences match the primary input
+    AlignmentInput::validate_headers_match(bam_header, &input.header, path)?;
+
+    let mut accumulator = CoverageAccumulator::new(bam_header, repeats, ref_path);
+
+    let mut count = 0u64;
+    while let Some(record) = input.read_record()? {
         accumulator.process(&record);
+        count += 1;
+        if count % 100_000 == 0 {
+            eprint!("\rAS alignments: {} records...", count);
+            std::io::Write::flush(&mut std::io::stderr())?;
+        }
+    }
+    if count >= 100_000 {
+        eprintln!();
     }
 
-    // Write output (standalone format without GC column)
-    let out_file = format!("{}.coverage.tsv", out_prefix);
-    accumulator.write_output(&out_file, false)?;
-
-    let reads_aligned = accumulator.reads_aligned();
-    info!("Total aligned reads (primary): {}", reads_aligned);
-    Ok(reads_aligned)
+    info!("AS alignments: processed {} records from {}", count, path);
+    Ok(accumulator)
 }
 

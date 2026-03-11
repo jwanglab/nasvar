@@ -36,6 +36,8 @@ pub struct PipelineRunner<'a> {
     fusion_partner_index: Option<PartnerGeneIndex>,
     // Pipeline config
     config: Option<&'a PipelineConfig>,
+    // Adaptive sampling alignments — replaces main BAM for coverage
+    as_alignments: Option<String>,
 }
 
 impl<'a> PipelineRunner<'a> {
@@ -51,6 +53,7 @@ impl<'a> PipelineRunner<'a> {
             fusion_one_sided: None,
             fusion_partner_index: None,
             config: None,
+            as_alignments: None,
         }
     }
 
@@ -90,6 +93,11 @@ impl<'a> PipelineRunner<'a> {
         self
     }
 
+    pub fn with_as_alignments(mut self, path: Option<String>) -> Self {
+        self.as_alignments = path;
+        self
+    }
+
     pub fn run(self) -> Result<PipelineResult, Box<dyn std::error::Error>> {
         info!("Starting Pipeline...");
 
@@ -104,10 +112,14 @@ impl<'a> PipelineRunner<'a> {
 
         // 1. Initialize Accumulators
 
-        // Coverage Accumulator
-        let mut cov_acc = if let Some(reps) = &self.coverage_repeats {
-            let acc = CoverageAccumulator::new(&header, reps, self.ref_path.as_deref());
-            Some(acc)
+        // Coverage Accumulator (skip if AS alignments will replace it)
+        let use_as_for_coverage = self.as_alignments.is_some();
+        let mut cov_acc = if !use_as_for_coverage {
+            if let Some(reps) = &self.coverage_repeats {
+                Some(CoverageAccumulator::new(&header, reps, self.ref_path.as_deref()))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -166,8 +178,18 @@ impl<'a> PipelineRunner<'a> {
             }
         }
         info!("Processed {} reads. Done.", i);
-        // Finalize
-        // Write coverage (with GC content for pipeline mode)
+
+        // Adaptive sampling coverage scan (replaces main BAM for coverage)
+        if let Some(ref as_path) = self.as_alignments {
+            if let Some(reps) = &self.coverage_repeats {
+                use crate::var::coverage::scan_as_alignments;
+                info!("Scanning adaptive sampling alignments for coverage...");
+                let as_acc = scan_as_alignments(as_path, &header, reps, self.ref_path.as_deref())?;
+                as_acc.write_output(&format!("{}.coverage.tsv", self.out_prefix), true)?;
+            }
+        }
+
+        // Write coverage from main BAM (when not using AS alignments)
         if let Some(c) = cov_acc {
             c.write_output(&format!("{}.coverage.tsv", self.out_prefix), true)?;
         }

@@ -143,9 +143,8 @@ pub fn call_fusions(
 {
     info!("Calling fusions...");
 
-    // Get file size for progress (use block count for consistent units with virtual position)
-    let file_size = std::fs::metadata(bam_path)?.len();
-    let file_blocks = (file_size >> 16) + 1; // Convert to BGZF block units
+    // Get total file size in BGZF block units for progress tracking
+    let file_blocks = bam.total_file_blocks();
 
     // Create accumulator (uses shared code for both CLI and pipeline)
     let mut accumulator = FusionAccumulator::new(&bam.header, targets, config);
@@ -191,7 +190,7 @@ pub fn call_fusions(
 
 pub fn call_fusions_from_hits(
     bam: &mut AlignmentInput,
-    bam_path: &str,
+    _bam_path: &str,
     targets: &Vec<BedRegion>,
     hit_reads: HashSet<String>,
     config: &PipelineConfig,
@@ -203,8 +202,7 @@ pub fn call_fusions_from_hits(
     let min_supporting_reads = config.thresholds.fusions.min_supporting_reads;
     let min_breakpoint_reads = config.thresholds.fusions.min_breakpoint_reads;
     let start_time = std::time::Instant::now();
-    let file_size = std::fs::metadata(bam_path)?.len();
-    let file_blocks = (file_size >> 16) + 1; // Convert to BGZF block units
+    let file_blocks = bam.total_file_blocks();
 
     // Create a ContigMapper to translate BED chromosome names to BAM chromosome names
     let mapper = ContigMapper::from_refs(&bam.header.refs);

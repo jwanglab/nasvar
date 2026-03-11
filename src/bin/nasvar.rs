@@ -62,7 +62,7 @@ impl LogLevel {
 enum Commands {
     /// Call Single Nucleotide Variants
     Snv {
-        /// Sorted and indexed BAM file containing aligned long reads. Must have an associated .bai index file.
+        /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
         /// Reference genome FASTA file. Must be indexed (i.e., a corresponding .fai file must exist).
@@ -86,7 +86,7 @@ enum Commands {
     },
     /// Call Copy Number Variants
     Cnv {
-        /// Sorted and indexed BAM/CRAM file containing aligned long reads.
+        /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
         /// Reference genome FASTA (required for CRAM input).
@@ -146,7 +146,7 @@ enum Commands {
     },
     /// Call Gene Fusions
     Fusions {
-        /// Sorted and indexed BAM/CRAM file containing aligned long reads.
+        /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
         /// Reference genome FASTA (required for CRAM input).
@@ -176,7 +176,7 @@ enum Commands {
     },
     /// Calculate Minor Allele Frequencies
     Maf {
-        /// Sorted and indexed BAM/CRAM file containing aligned long reads.
+        /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
         /// Reference genome FASTA (required for CRAM input).
@@ -197,7 +197,7 @@ enum Commands {
     },
     /// Calculate Read Depth / Coverage
     Coverage {
-        /// Sorted and indexed BAM/CRAM file containing aligned long reads.
+        /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
         /// Reference genome FASTA (required for CRAM input).
@@ -212,23 +212,34 @@ enum Commands {
         /// Force overwrite of existing output files.
         #[arg(short, long)]
         force: bool,
+        /// Adaptive sampling alignment file (SAM/BAM/CRAM) to use INSTEAD of the main BAM for coverage/karyotyping. Does not require sorting or index.
+        #[arg(long)]
+        as_alignments: Option<String>,
     },
     /// Run Full Pipeline
     Pipeline {
+        /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(required = true)]
         bam: String,
+        /// BED file of repetitive/masked regions for coverage masking and BAF site filtering.
         #[arg(required = true)]
         repeats: String,
+        /// BED file of enriched/targeted regions for MAF site prioritization.
         #[arg(required = true)]
         enriched: String,
+        /// Sites file for MAF/BAF calculation (tab-delimited: CHR POS REF ALT).
         #[arg(required = true)]
         sites: String,
+        /// BED file of gene targets for fusion calling (one region per gene).
         #[arg(required = true)]
         targets: String,
+        /// Reference genome FASTA file (indexed with .fai). Required for GC correction and CRAM input.
         #[arg(required = true)]
         fasta: String,
+        /// GFF3 gene annotation file for SNV annotation and partner gene lookup.
         #[arg(required = true)]
         gff: String,
+        /// Output prefix. Results are written to <prefix>.result.json, <prefix>.coverage.tsv, <prefix>.maf, etc.
         #[arg(required = true)]
         out_prefix: String,
         /// Force overwrite of existing output files.
@@ -252,10 +263,13 @@ enum Commands {
         /// Per-segment percentile for karyotype plot y-axis limit (0.0-1.0).
         #[arg(long, default_value_t = 0.95)]
         plot_y_percentile: f64,
+        /// Adaptive sampling alignment file (SAM/BAM/CRAM) to use INSTEAD of the main BAM for coverage/karyotyping. Does not require sorting or index.
+        #[arg(long)]
+        as_alignments: Option<String>,
     },
     /// Call Internal Tandem Duplications (ITDs)
     Itd {
-        /// Sorted and indexed BAM/CRAM file containing aligned long reads.
+        /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
         /// Reference genome FASTA (required for CRAM input).
@@ -273,7 +287,7 @@ enum Commands {
     },
     /// Build consensus sequences for fusion breakpoints
     Breakpoints {
-        /// Sorted and indexed BAM/CRAM file containing aligned long reads.
+        /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
         /// Reference genome FASTA (required for CRAM input).
@@ -730,6 +744,7 @@ fn main() {
             repeats,
             out_prefix,
             force,
+            as_alignments,
         } => {
             if let Err(e) = check_output_paths(out_prefix, &[".coverage.tsv"], *force) {
                 error!("{}", e);
@@ -754,7 +769,7 @@ fn main() {
                     return;
                 }
             };
-            match read_depth(&mut br, &r_vec, out_prefix) {
+            match read_depth(&mut br, &r_vec, out_prefix, as_alignments.as_deref()) {
                 Ok(reads_aligned) => info!("Aligned reads counted: {}", reads_aligned),
                 Err(e) => error!("Error calculating coverage: {}", e),
             }
@@ -775,6 +790,7 @@ fn main() {
             gc_correction,
             min_depth,
             plot_y_percentile,
+            as_alignments,
         } => {
             let mut timer = StepTimer::new();
 
@@ -893,7 +909,8 @@ fn main() {
                 .with_fusions(t_vec.clone())
                 .with_one_sided(os_set.clone())
                 .with_partner_index(partner_index.clone())
-                .with_config(&pipeline_config);
+                .with_config(&pipeline_config)
+                .with_as_alignments(as_alignments.clone());
 
             let (pipeline_output, reads_aligned, focal_depths) = match runner.run() {
                 Ok(r) => (r.output, r.reads_aligned, r.focal_depths),

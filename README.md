@@ -10,7 +10,8 @@ A variant calling pipeline for long-read sequencing with adaptive sampling, with
 - Targeted **SNV calling** in enriched regions
 - **CNV detection** in and around enriched regions, with GC bias correction and adjustment for inferred tumor fraction
 - **ITD calling** (and other small indels)
-- **BAM and CRAM support** with automatic format detection (WARNING: CRAM file processing will be MUCH slower than the corresponding BAM file)
+- **BAM, CRAM, and SAM support** with automatic format detection. Pass a `.txt` or `.list` file to transparently merge multiple alignment files. (Note: CRAM file processing will be much slower than BAM.)
+- **Adaptive sampling coverage** (`--as-alignments`): use a separate alignment file for coverage/karyotyping instead of the main BAM, for experiments with adaptive sampling decisions recorded in a separate file
 - **Output**: JSON with schema, configurable markdown and HTML reports
 
 ## Installation
@@ -67,7 +68,7 @@ This produces:
 
 | File | Description |
 |------|-------------|
-| BAM/CRAM | Sorted and indexed alignment file (`.bai` or `.crai` required) |
+| BAM/CRAM/SAM | Sorted and indexed alignment file (`.bai` or `.crai` required for indexed operations). A `.txt` or `.list` file containing one path per line can be used to merge multiple files transparently. |
 | Reference FASTA | Indexed genome reference (`.fai` required) |
 | GFF3 | Gene annotations |
 | Pipeline config | JSON file specifying genes and thresholds |
@@ -81,12 +82,16 @@ This produces:
 
 ### `nasvar pipeline`
 
-Runs all analyses in optimized order (parsing BAM/CRAM as few times as possible). Positional arguments:
+Runs all analyses in optimized order (parsing the alignment file as few times as possible). Positional arguments:
 
 ```
 nasvar pipeline <BAM> <REPEATS> <ENRICHED> <SITES> <TARGETS> <FASTA> <GFF> <OUT_PREFIX> \
-  --config <JSON> --reference <JSON> [-f]
+  --config <JSON> --reference <JSON> [-f] [--as-alignments <FILE>]
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--as-alignments <FILE>` | Use this alignment file (BAM/SAM/CRAM) for coverage/karyotyping instead of the main BAM. Does not require sorting or index. |
 
 ### `nasvar snv`
 
@@ -130,8 +135,12 @@ Calculate binned read depth.
 
 ```
 nasvar coverage --bam <BAM> --repeats <BED> --out-prefix <PREFIX> \
-  [--ref-fasta <FASTA>] [-f]
+  [--ref-fasta <FASTA>] [--as-alignments <FILE>] [-f]
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--as-alignments <FILE>` | Use this alignment file for coverage instead of the main BAM. Does not require sorting or index. |
 
 ### `nasvar maf`
 
@@ -301,6 +310,14 @@ Create the index with `samtools index sample.bam`.
 ### CRAM reference required
 
 CRAM files require a reference FASTA for decoding. Pass `--ref-fasta reference.fa` for any subcommand that reads a CRAM file.
+
+### Malformed SAM records
+
+```
+WARN Skipping malformed SAM record: unexpected EOL
+```
+
+Truncated or malformed lines in SAM files are automatically skipped with a warning (up to 5 individual warnings, then a summary at the end). BAM and CRAM parse errors are still treated as fatal.
 
 ### Output file already exists
 

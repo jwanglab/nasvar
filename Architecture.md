@@ -14,7 +14,7 @@ src/
 ├── lib.rs                  # Library root; re-exports and declares submodules
 ├── bam.rs                  # BAM utility helpers
 ├── config.rs               # JSON configuration loading (PipelineConfig, ReferenceConfig, AggregateConfig)
-├── input.rs                # Unified BAM/CRAM reader abstraction (AlignmentInput)
+├── input.rs                # Unified BAM/CRAM/SAM reader abstraction (AlignmentInput, multi-file support)
 ├── bin/
 │   ├── nasvar.rs           # Main CLI binary (clap subcommands)
 │   └── aggregate.rs        # Multi-sample TSV report generator
@@ -65,9 +65,9 @@ src/
 
 ### 1. Accumulator Pattern (Single-Pass Scanning)
 
-The `PipelineRunner` (`src/pipeline/mod.rs`) processes the BAM file once and feeds each record to multiple accumulators simultaneously:
+The `PipelineRunner` (`src/pipeline/mod.rs`) processes the alignment file once and feeds each record to multiple accumulators simultaneously:
 
-- **CoverageAccumulator** -- bins reads into 1 Mb windows, masks repeats via `BitVec`, tracks GC content
+- **CoverageAccumulator** -- bins reads into 1 Mb windows, masks repeats via `BitVec`, tracks GC content. When `--as-alignments` is provided, the accumulator is NOT fed from the main loop; instead, a separate scan of the AS file creates its own accumulator exclusively for coverage.
 - **MafAccumulator** -- counts ref/alt alleles at pre-specified SNP sites using binary search
 - **FusionScanner** -- identifies reads overlapping fusion target regions, collects read names for Pass 2
 - **QcAccumulator** -- tracks on-target QC metrics AND per-gene focal depths in a single pass
@@ -126,10 +126,11 @@ PipelineRunner::new(bam_path, out_prefix)
     .with_one_sided(one_sided_genes)
     .with_partner_index(partner_index)
     .with_config(&config)
+    .with_as_alignments(as_path)  // optional: use separate file for coverage
     .run()
 ```
 
-Components are optional -- the runner skips accumulators that aren't configured.
+Components are optional -- the runner skips accumulators that aren't configured. When `as_alignments` is set, the CoverageAccumulator is not created during the main loop; instead, coverage is computed exclusively from the AS file after the main loop completes.
 
 ### 3. Unified Output (OutputCollector)
 
@@ -154,13 +155,16 @@ The `UnifiedOutput` struct derives `JsonSchema` (via `schemars`) for automatic s
 
 ### 4. Unified Input Abstraction
 
-`AlignmentInput` (`src/input.rs`) wraps both BAM and CRAM readers behind a single interface:
+`AlignmentInput` (`src/input.rs`) wraps BAM, CRAM, and SAM readers behind a single interface, with transparent multi-file support:
 
-- **Format detection**: Reads the first 4 bytes of the file. If they match `b"CRAM"`, opens as CRAM; otherwise opens as BAM.
-- **Index handling**: Automatically looks for `.bai` (BAM) or `.crai` (CRAM) index files. The `require_index()` method validates that an index exists before region queries.
-- **Record decoding**: Noodles SAM records are converted to owned `AlignmentRecord` structs containing name, ref\_id, position (0-based), flags, MAPQ, sequence, quality, and pre-parsed CIGAR operations.
+- **Format detection**: SAM is detected by `.sam` extension. For binary files, reads the first 4 bytes -- if they match `b"CRAM"`, opens as CRAM; otherwise opens as BAM.
+- **Multi-file input**: If the path ends in `.txt` or `.list`, it is treated as a file-of-filenames (one alignment path per line, comments with `#`). All files must share identical reference sequences (validated on open). Records are returned by exhausting each reader sequentially. Region queries merge results from all readers, sorted by `(ref_id, pos)`.
+- **Index handling**: Automatically looks for `.bai` (BAM) or `.crai` (CRAM) index files. The `require_index()` method validates that an index exists before region queries. SAM files never have an index.
+- **Record decoding**: Noodles records are converted to owned `AlignmentRecord` structs containing name, ref\_id, position (0-based), flags, MAPQ, sequence, quality, and pre-parsed CIGAR operations.
 - **CRAM buffering**: CRAM files are read container-by-container into a `VecDeque<AlignmentRecord>` buffer. Only `seek(0)` is supported (re-opens the file).
 - **CRAM reference**: Requires a FASTA reference for decoding. A `noodles::fasta::Repository` is constructed from an indexed FASTA reader.
+- **Malformed SAM handling**: When reading SAM files, parse errors (e.g., truncated lines) are caught and skipped with a warning rather than aborting. The first 5 errors are logged individually; further errors are suppressed until a summary is printed at EOF. BAM/CRAM errors are still fatal.
+- **Progress tracking**: `tell()` returns a composite position across all readers (completed file sizes + current reader position). `total_file_blocks()` provides the denominator for percentage calculation.
 
 ## Data Flow
 
@@ -169,16 +173,20 @@ The `UnifiedOutput` struct derives `JsonSchema` (via `schemars`) for automatic s
 ```
 Initialization
   ├── Load PipelineConfig + ReferenceConfig from JSON
-  ├── Open BAM/CRAM via AlignmentInput
+  ├── Open BAM/CRAM/SAM via AlignmentInput (single file or .txt/.list of files)
   ├── Parse BED files (targets, repeats, enriched) and MAF sites
   └── Load partner gene index from GFF (for one-sided fusions)
        │
        ▼
 Pass 1: PipelineRunner.run()
-  ├── CoverageAccumulator  ──→  {prefix}.coverage.tsv
+  ├── CoverageAccumulator  ──→  {prefix}.coverage.tsv  [skipped if --as-alignments]
   ├── MafAccumulator       ──→  {prefix}.maf
   ├── FusionScanner        ──→  candidate read names (HashSet)
   └── QcAccumulator        ──→  PipelineQcData + HashMap<gene, depth>
+       │
+       ▼
+AS Alignment Scan (optional, when --as-alignments provided)
+  └── scan_as_alignments() ──→  {prefix}.coverage.tsv  [replaces main BAM coverage]
        │
        ▼
 Pass 2: Fusion Refinement
@@ -461,12 +469,14 @@ Pharmacogenomics genes (configured in `snv.pharmacogenomics`) report all variant
 
 **File**: `src/var/coverage.rs`
 
-- Iterates through all records in the BAM (sequential scan)
+- Iterates through all records in the alignment file (sequential scan)
 - Bins positions into 1 Mb windows (configurable via `coverage.bin_size`)
 - Masks repeat regions using a `BitVec` (bits set for repeat positions are excluded from counts)
 - Calculates per-bin GC content from the reference FASTA
 - Counts only primary aligned reads
 - Returns total aligned read count (used for karyotype normalization)
+
+**Adaptive sampling mode** (`--as-alignments`): When provided, the main BAM is not scanned for coverage. Instead, `scan_as_alignments()` opens the AS file via `AlignmentInput::open()`, validates that its reference sequences match the main BAM, creates a fresh `CoverageAccumulator`, and scans the entire file. The AS file does not require sorting or an index. This is used when adaptive sampling decisions are recorded in a separate alignment file that should replace the main BAM for coverage/karyotyping.
 
 ### MAF Calculation
 
@@ -625,6 +635,8 @@ Single JSON file containing all analysis results via `UnifiedOutput`. Fields are
 | CRAM decoding failure | Missing `--ref-fasta` | Provide reference FASTA |
 | Output file exists | Previous run output present | Use `--force` / `-f` |
 | JSON parse error | Malformed config file | Validate JSON syntax and field names |
+| Malformed SAM record (warning) | Truncated or corrupt SAM line | Automatically skipped; check SAM file integrity |
+| Reference mismatch (multi-BAM) | Files in `.txt`/`.list` have different reference sequences | Ensure all files were aligned to the same reference |
 
 ## Testing
 

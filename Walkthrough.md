@@ -171,6 +171,26 @@ minimap2 -a -x map-ont -y --MD \
 samtools index sample.T2T.sorted.bam
 ```
 
+### Multiple BAM files
+
+If your reads are split across multiple BAM files (e.g., from separate sequencing runs), create a text file listing all paths (one per line) and pass it as the BAM argument:
+
+```bash
+# Create a file-of-filenames
+echo "run1.sorted.bam" > bam_list.txt
+echo "run2.sorted.bam" >> bam_list.txt
+echo "run3.sorted.bam" >> bam_list.txt
+
+# Use it directly -- nasvar auto-detects .txt and .list files
+nasvar pipeline bam_list.txt repeats.bed enriched.bed ...
+```
+
+All files must be aligned to the same reference (same sequence names and order). Each file must be individually sorted and indexed.
+
+### Supported formats
+
+nasvar transparently reads BAM, CRAM, and SAM files. Format is auto-detected (CRAM by magic bytes, SAM by `.sam` extension, BAM otherwise). CRAM files require `--ref-fasta`. File-of-filenames (`.txt`/`.list`) can mix formats.
+
 ## 6. Run the pipeline
 
 ```bash
@@ -201,7 +221,27 @@ mkdir -p results/sample
 | `--gc-correction linear` | Use linear instead of LOESS for GC bias correction |
 | `--gc-correction none` | Skip GC correction entirely |
 | `--blast-ratio 0.5` | Override tumor fraction estimate (0.0-1.0); if omitted, estimated from the data |
+| `--as-alignments <FILE>` | Use this alignment file (BAM/SAM/CRAM) for coverage/karyotyping instead of the main BAM. Does not require sorting or index. See below. |
 | `-f` / `--force` | Overwrite existing output files |
+
+### Adaptive sampling coverage (`--as-alignments`)
+
+In adaptive sampling experiments, the sequencer records accept/reject decisions for every read. If these decisions are captured in a separate alignment file (e.g., a SAM file containing all reads, including rejected ones), you can use `--as-alignments` to compute coverage from that file instead of the main BAM:
+
+```bash
+nasvar pipeline \
+  sample.T2T.sorted.bam \
+  repeats.bed enriched.bed maf_sites.tsv targets.bed \
+  reference.fna genes.gff results/sample/sample \
+  --config pipeline.json --reference reference.json \
+  --as-alignments adaptive_sampling_decisions.sam
+```
+
+When `--as-alignments` is provided:
+- The main BAM is still used for fusion, SNV, ITD, MAF, and CNV calling
+- Coverage and karyotyping are computed exclusively from the AS file
+- The AS file does not need to be sorted or indexed
+- Malformed SAM records (e.g., truncated lines) are automatically skipped with a warning
 
 ### Verbose logging
 
@@ -282,6 +322,10 @@ The full pipeline runs all modules automatically, but you can also run stages in
 ```bash
 # Coverage only
 nasvar coverage --bam sample.bam --repeats repeats.bed --out-prefix results/sample/sample
+
+# Coverage from adaptive sampling file
+nasvar coverage --bam sample.bam --repeats repeats.bed --out-prefix results/sample/sample \
+  --as-alignments adaptive_sampling.sam
 
 # MAF only
 nasvar maf --bam sample.bam --enriched enriched.bed --sites maf_sites.tsv --out-prefix results/sample/sample
