@@ -757,7 +757,9 @@ fn find_maf_peak(levels_maf: &HashMap<usize, Vec<f64>>) -> HashMap<usize, f64> {
             continue;
         }
 
-        let binsize = find_bin_width(mafs).min(0.05); // cap at 0.05
+        let mut sorted_mafs = mafs.clone();
+        sorted_mafs.sort_by(|a, b| a.total_cmp(b));
+        let binsize = find_bin_width(&sorted_mafs).min(0.05); // cap at 0.05
 
         // Histogram 0.0 to 0.6
         let num_bins = (0.6 / binsize).ceil() as usize;
