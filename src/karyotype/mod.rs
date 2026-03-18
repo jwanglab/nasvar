@@ -1276,20 +1276,20 @@ fn resolve_cn_states(
     if sorted_levels.len() < 2 || (v2 - v1).abs() < 0.05 {
         // Check MAF
         if let Some(peaks) = maf_peaks {
-            // We need to map back to the index in `levels`.
-            // If len < 2, v1 corresponds to levels[0] (which has index 0 in our map).
             if let Some(&peak) = peaks.get(&0) {
                 if peak > 0.4 {
                     debug!("Single level, MAF peak {:.2} confirms 2n", peak);
+                    return (v1 * 0.5, v1, v1 * 1.5);
                 } else {
                     debug!(
-                        "Single level, MAF peak {:.2} suggests NOT 2n (likely 1n)",
+                        "Single level, MAF peak {:.2} suggests NOT 2n (likely 1n). Setting single level as CN1.",
                         peak
                     );
+                    return (v1, v1 * 2.0, v1 * 3.0);
                 }
             }
         }
-        // Default to 2n behavior for single peak
+        // No MAF data available - default to 2n
         return (v1 * 0.5, v1, v1 * 1.5);
     }
 
