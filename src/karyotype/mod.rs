@@ -479,14 +479,14 @@ fn quantile(data: &[f64], q: f64) -> f64 {
     }
 }
 
-pub fn find_bin_width(data: &[f64]) -> f64 {
-    // defaults: alpha=0.12, trim=95, deviation=35
-    let alpha = 0.12;
-    let deviation = 0.35;
+pub fn find_bin_width(data: &[f64], alpha: Option<f64>, deviation: Option<f64>, trim_percentile: Option<f64>) -> f64 {
+    let alpha = alpha.unwrap_or(0.12);
+    let deviation = deviation.unwrap_or(0.35);
+    let trim_percentile = trim_percentile.unwrap_or(0.95);
 
     let iqr = quantile(data, 0.5 + deviation) - quantile(data, 0.5 - deviation);
     let n = data.len() as f64;
-    let maxi = quantile(data, 0.95);
+    let maxi = quantile(data, trim_percentile);
 
     let binsize = ((1.0 - alpha) * iqr + alpha * maxi / 2.0) * 2.0 * n.powf(-1.0 / 3.0);
     if binsize <= 0.0 { 0.01 } else { binsize }
@@ -501,7 +501,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
     all_values.sort_by(|a, b| a.total_cmp(b));
 
     // 2. Bin width - round to nearest integer
-    let bin_size_raw = find_bin_width(&all_values);
+    let bin_size_raw = find_bin_width(&all_values, None, None, None);
     let bin_size = bin_size_raw.round().max(1.0); // Round to integer, minimum 1
     debug!("Calculated histogram bin size: {:.0}", bin_size);
 
@@ -759,7 +759,7 @@ fn find_maf_peak(levels_maf: &HashMap<usize, Vec<f64>>) -> HashMap<usize, f64> {
 
         let mut sorted_mafs = mafs.clone();
         sorted_mafs.sort_by(|a, b| a.total_cmp(b));
-        let binsize = find_bin_width(&sorted_mafs).min(0.05); // cap at 0.05
+        let binsize = find_bin_width(&sorted_mafs, Some(0.0), Some(0.25), Some(1.0)).min(0.05); // cap at 0.05
 
         // Histogram 0.0 to 0.6
         let num_bins = (0.6 / binsize).ceil() as usize;
@@ -845,7 +845,6 @@ pub fn compute_seg_bases(
             }
         }
     }
-
     seg_counts
 }
 
@@ -905,14 +904,14 @@ pub fn call_karyotype(
     if let Some(mp) = maf_path {
         let (maf_data, maf_counts) = parse_maf(mp, ref_config, thresholds.min_depth)?;
         if !maf_data.is_empty() {
-            // Count segments with >1% MAF density; all callable site
+            // Count segments with >4% MAF density; all callable site
             let maf_sufficient = if let Some(sb) = seg_bases {
                 let mut sufficient_segs = 0;
                 for (seg, &count) in &maf_counts {
                     if let Some(&bases) = sb.get(seg) {
                         if bases > 0 {
                             let ratio = count as f64 / bases as f64;
-                            if ratio > 0.01 {
+                            if ratio > 0.04 {
                                 sufficient_segs += 1;
                             }
                         }
@@ -942,7 +941,13 @@ pub fn call_karyotype(
                     warnings.push(w);
                 }
             }
+        } else {
+            // there is no MAF data 
+            let w = "Not enough MAF data for karyotyping!".to_string();
+            warn!("{}", w);
+            warnings.push(w);
         }
+        
     }
 
     // Infer CN states (predict_karyo_v2 + MAF logic)
