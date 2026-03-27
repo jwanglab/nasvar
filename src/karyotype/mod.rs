@@ -951,7 +951,7 @@ pub fn call_karyotype(
     }
 
     // Infer CN states (predict_karyo_v2 + MAF logic)
-    let (cn1, cn2, cn3) = resolve_cn_states(&levels, levels_maf_peaks.as_ref());
+    let (cn1, cn2, cn3) = resolve_cn_states(&levels, levels_maf_peaks.as_ref(), &mut warnings);
 
     debug!(
         "Estimated levels: CN1={:.2}, CN2={:.2}, CN3={:.2}",
@@ -1255,6 +1255,7 @@ fn within_segment_spread(chrom_bins: &HashMap<String, Vec<f64>>) -> f64 {
 fn resolve_cn_states(
     levels: &[(f64, usize)],
     maf_peaks: Option<&HashMap<usize, f64>>,
+    warnings: &mut Vec<String>,
 ) -> (f64, f64, f64) {
     if levels.is_empty() {
         return (1.0, 2.0, 3.0);
@@ -1317,61 +1318,39 @@ fn resolve_cn_states(
         debug!("Level 1 ({:.2}, idx {}): MAF peak {:.2}", v1, idx_v1, p1);
         debug!("Level 2 ({:.2}, idx {}): MAF peak {:.2}", v2, idx_v2, p2);
 
-        // Case 0: BOTH levels have high MAF (>0.4) - compare them to decide
-        // This is critical for hypodiploid cases where monosomic regions also have MAF ~0.5
-        // BUT only use MAF comparison if the difference is meaningful (> 0.03)
-        if p1 > 0.4 && p2 > 0.4 {
-            let maf_diff = (p2 - p1).abs();
-            if maf_diff < 0.03 {
-                // MAF difference too small to be meaningful - fall back to ratio logic
-                debug!(
-                    "Both MAF > 0.4 but diff too small ({:.3}). Falling back to ratio logic.",
-                    maf_diff
-                );
-                // Don't return here - let it fall through to the ratio-based logic below
-            } else if p2 > p1 {
-                // Higher level has higher MAF → v2 is more likely diploid, v1 is monosomic
-                // BUT add ratio sanity check: if ratio < 1.6, levels are likely 2n/3n not 1n/2n
-                if v2 / v1 >= 1.6 {
+        // Both levels have a MAF peak: use the one closest to 0.5 (heterozygous
+        // equilibrium) as the diploid level. If they are too similar to distinguish,
+        // warn and fall back to ratio logic.
+        if p1 > 0.0 && p2 > 0.0 {
+            let d1 = (p1 - 0.5_f64).abs();
+            let d2 = (p2 - 0.5_f64).abs();
+
+            if (d1 - d2).abs() > 0.05 {
+                // Meaningful difference — use closest-to-0.5 as diploid
+                if d1 < d2 {
                     debug!(
-                        "Both MAF > 0.4, p2 ({:.2}) > p1 ({:.2}), ratio >= 1.6. v1=1n, v2=2n. cn2/cn1 = {:.2}",
-                        p2,
-                        p1,
-                        v2 / v1
-                    );
-                    return (v1, v2, v2 + (v2 - v1));
-                } else {
-                    // Ratio too low for 1n/2n - MAF difference is likely noise
-                    debug!(
-                        "Both MAF > 0.4, p2 ({:.2}) > p1 ({:.2}), but ratio < 1.6. Likely 2n/3n. cn3/cn2 = {:.2}",
-                        p2,
-                        p1,
-                        v2 / v1
+                        "MAF closest-to-0.5: v1 is diploid (MAF {:.4}, d={:.4}). v2 is CN3.",
+                        p1, d1
                     );
                     return (2.0 * v1 - v2, v1, v2);
-                }
-            } else {
-                // Lower level has higher/equal MAF → v1 is diploid (with ratio sanity check)
-                if v2 / v1 >= 1.6 {
-                    debug!(
-                        "Both MAF > 0.4, p1 >= p2, but ratio >= 1.6. v1=1n, v2=2n. cn2/cn1 = {:.2}",
-                        v2 / v1
-                    );
-                    return (v1, v2, v2 + (v2 - v1));
                 } else {
                     debug!(
-                        "Both MAF > 0.4, p1 ({:.2}) >= p2 ({:.2}). v1=2n, v2=3n. cn3/cn2 = {:.2}",
-                        p1,
-                        p2,
-                        v2 / v1
+                        "MAF closest-to-0.5: v2 is diploid (MAF {:.4}, d={:.4}). v1 is CN1.",
+                        p2, d2
                     );
-                    return (2.0 * v1 - v2, v1, v2);
+                    return (v1, v2, v2 + (v2 - v1));
                 }
             }
-        }
 
-        // Case 1: Only lower level has high MAF (>0.4)
-        if p1 > 0.4 {
+            let w = "MAF signals for the top two levels are too close. This may indicate low blast ratio.".to_string();
+            warn!("{}", w);
+            warnings.push(w);
+            debug!(
+                "MAF distances from 0.5 too similar (d1={:.4}, d2={:.4}). Falling back to ratio logic.",
+                d1, d2
+            );
+        } else if p1 > 0.4 {
+            // Case 1: Only lower level has high MAF (>0.4)
             // Coverage ratio sanity check: if v2/v1 >= 1.6, the levels are actually 1n/2n
             // (the high MAF on lower level is misleading, possibly due to low blast fraction)
             if v2 / v1 >= 1.6 {
@@ -1388,19 +1367,17 @@ fn resolve_cn_states(
                 // cn1 = cn2 - (cn3 - cn2) = 2*v1 - v2
                 return (2.0 * v1 - v2, v1, v2);
             }
-        }
-
-        // Case 2: Only higher level has high MAF (>0.4)
-        if p2 > 0.4 {
+        } else if p2 > 0.4 {
+            // Case 2: Only higher level has high MAF (>0.4)
             debug!(
                 "MAF suggests v2 is 2n (peak > 0.4). v1 likely 1n. cn2/cn1 = {:.2}",
                 v2 / v1
             );
             return (v1, v2, v2 + (v2 - v1));
+        } else {
+            // Ambiguous MAF — fall back to ratio logic
+            debug!("MAF ambiguous. Falling back to ratio logic.");
         }
-
-        // Ambiguous MAF? Fallback to ratio logic
-        debug!("MAF ambiguous. Falling back to ratio logic.");
     }
 
     // heuristic fallback logic
