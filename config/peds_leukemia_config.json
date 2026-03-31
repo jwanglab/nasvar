@@ -30,6 +30,14 @@
         "min_length": 4,
         "min_frequency": 0.05,
         "label": "insertion"
+      },
+      "CEBPA": {
+	"chrom": "NC_060943.1",
+	"start": 35821110,
+        "end": 35821373,
+        "min_length": 1,
+        "min_frequency": 0.2,
+        "label": "insertion"
       }
     },
     "snv": {

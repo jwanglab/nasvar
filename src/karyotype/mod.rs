@@ -18,10 +18,10 @@ use std::io::{BufRead, BufReader, Write};
 pub enum GcCorrectionMethod {
     /// No GC bias correction
     None,
-    /// Simple linear regression (default)
-    #[default]
+    /// Simple linear regression
     Linear,
     /// LOESS local regression (handles non-linear bias)
+    #[default]
     Loess,
 }
 
@@ -1325,7 +1325,7 @@ fn resolve_cn_states(
             let d1 = (p1 - 0.5_f64).abs();
             let d2 = (p2 - 0.5_f64).abs();
 
-            if (d1 - d2).abs() > 0.05 {
+            if (d1 - d2).abs() > 0.04 {
                 // Meaningful difference — use closest-to-0.5 as diploid
                 if d1 < d2 {
                     debug!(
