@@ -47,12 +47,15 @@ pub struct ItdRegion {
     pub min_length: isize,
     #[serde(default)]
     pub min_frequency: f64,
+    #[serde(default = "default_itd_min_supporting_reads")]
+    pub min_supporting_reads: usize,
     /// Display label for reports/columns (e.g. "ITD", "insertion"). Defaults to "ITD".
     #[serde(default = "default_itd_label")]
     pub label: String,
 }
 
 fn default_min_length() -> isize { 3 }
+fn default_itd_min_supporting_reads() -> usize { 2 }
 fn default_itd_label() -> String { "ITD".to_string() }
 
 /// CNV gene configuration
