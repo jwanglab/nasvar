@@ -1311,12 +1311,11 @@ fn resolve_cn_states(
         .unwrap_or(0);
 
     if let Some(peaks) = maf_peaks {
-        // We have MAF data
         let p1 = peaks.get(&idx_v1).cloned().unwrap_or(0.0);
         let p2 = peaks.get(&idx_v2).cloned().unwrap_or(0.0);
 
-        debug!("Level 1 ({:.2}, idx {}): MAF peak {:.2}", v1, idx_v1, p1);
-        debug!("Level 2 ({:.2}, idx {}): MAF peak {:.2}", v2, idx_v2, p2);
+        debug!("Level 1 ({:.2}, idx {}): MAF peak {:.4}", v1, idx_v1, p1);
+        debug!("Level 2 ({:.2}, idx {}): MAF peak {:.4}", v2, idx_v2, p2);
 
         // Both levels have a MAF peak: use the one closest to 0.5 (heterozygous
         // equilibrium) as the diploid level. If they are too similar to distinguish,
@@ -1360,11 +1359,7 @@ fn resolve_cn_states(
                 );
                 return (v1, v2, v2 + (v2 - v1));
             } else {
-                debug!(
-                    "MAF suggests v1 is 2n (peak > 0.4). v2 likely 3n. cn3/cn2 = {:.2}",
-                    v2 / v1
-                );
-                // cn1 = cn2 - (cn3 - cn2) = 2*v1 - v2
+                debug!("Only v2 has MAF ({:.4} < 0.4) → v2 likely haploid, v1 is diploid.", p);
                 return (2.0 * v1 - v2, v1, v2);
             }
         } else if p2 > 0.4 {
