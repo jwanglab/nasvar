@@ -97,12 +97,13 @@ pub fn call_itds(
         let mut events: Vec<ItdEvent> = Vec::new();
         let min_length = region.min_length;
         let min_frequency = region.min_frequency;
+        let min_supporting_reads = region.min_supporting_reads;
         let mut sorted_ins_positions: Vec<&usize> = indels.keys().collect();
         sorted_ins_positions.sort_unstable();
         for t in &sorted_ins_positions {
             let cts: Vec<(&isize, &usize)> = indels[t]
                 .iter()
-                .filter(|(l, count)| **l >= min_length && **count > 1)
+                .filter(|(l, count)| **l >= min_length && **count >= min_supporting_reads)
                 .collect();
             if cts.is_empty() {
                 continue;
@@ -110,7 +111,7 @@ pub fn call_itds(
             let mut sorted_ins: Vec<&isize> = indels[t].keys().collect();
             sorted_ins.sort_unstable();
             for l in sorted_ins {
-                if *l >= min_length && indels[t][l] > 1 {
+                if *l >= min_length && indels[t][l] >= min_supporting_reads {
                     events.push(ItdEvent {
                         position: **t as i64,
                         length: *l as i64,

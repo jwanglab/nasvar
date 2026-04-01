@@ -18,10 +18,10 @@ use std::io::{BufRead, BufReader, Write};
 pub enum GcCorrectionMethod {
     /// No GC bias correction
     None,
-    /// Simple linear regression (default)
-    #[default]
+    /// Simple linear regression
     Linear,
     /// LOESS local regression (handles non-linear bias)
+    #[default]
     Loess,
 }
 
@@ -951,7 +951,7 @@ pub fn call_karyotype(
     }
 
     // Infer CN states (predict_karyo_v2 + MAF logic)
-    let (cn1, cn2, cn3) = resolve_cn_states(&levels, levels_maf_peaks.as_ref());
+    let (cn1, cn2, cn3) = resolve_cn_states(&levels, levels_maf_peaks.as_ref(), &mut warnings);
 
     debug!(
         "Estimated levels: CN1={:.2}, CN2={:.2}, CN3={:.2}",
@@ -1255,6 +1255,7 @@ fn within_segment_spread(chrom_bins: &HashMap<String, Vec<f64>>) -> f64 {
 fn resolve_cn_states(
     levels: &[(f64, usize)],
     maf_peaks: Option<&HashMap<usize, f64>>,
+    warnings: &mut Vec<String>,
 ) -> (f64, f64, f64) {
     if levels.is_empty() {
         return (1.0, 2.0, 3.0);
@@ -1316,15 +1317,14 @@ fn resolve_cn_states(
         debug!("Level 1 ({:.2}, idx {}): MAF peak {:.4}", v1, idx_v1, p1);
         debug!("Level 2 ({:.2}, idx {}): MAF peak {:.4}", v2, idx_v2, p2);
 
-        // Identify the diploid band by picking the level whose MAF peak is
-        // closest to 0.5 (heterozygous equilibrium). This avoids hard threshold
-        // sensitivity — e.g. a near-haploid sample with MAF 0.40 vs 0.49 correctly
-        // identifies the 0.49 band as diploid regardless of GC correction shifts.
+        // Both levels have a MAF peak: use the one closest to 0.5 (heterozygous
+        // equilibrium) as the diploid level. If they are too similar to distinguish,
+        // warn and fall back to ratio logic.
         if p1 > 0.0 && p2 > 0.0 {
             let d1 = (p1 - 0.5_f64).abs();
             let d2 = (p2 - 0.5_f64).abs();
 
-            if (d1 - d2).abs() > 0.03 {
+            if (d1 - d2).abs() > 0.04 {
                 // Meaningful difference — use closest-to-0.5 as diploid
                 if d1 < d2 {
                     debug!(
@@ -1341,31 +1341,38 @@ fn resolve_cn_states(
                 }
             }
 
+            let w = "MAF signals for the top two levels are too close. This may indicate low blast ratio.".to_string();
+            warn!("{}", w);
+            warnings.push(w);
             debug!(
                 "MAF distances from 0.5 too similar (d1={:.4}, d2={:.4}). Falling back to ratio logic.",
                 d1, d2
             );
-        } else if p1 > 0.0 || p2 > 0.0 {
-            // Only one level has a MAF peak — use it with the 0.4 threshold
-            let (p, is_v1) = if p1 > 0.0 { (p1, true) } else { (p2, false) };
-            if p > 0.4 {
-                if is_v1 {
-                    debug!("Only v1 has MAF ({:.4} > 0.4) → v1 is diploid.", p);
-                    return (2.0 * v1 - v2, v1, v2);
-                } else {
-                    debug!("Only v2 has MAF ({:.4} > 0.4) → v2 is diploid.", p);
-                    return (v1, v2, v2 + (v2 - v1));
-                }
-            } else if is_v1 {
-                debug!("Only v1 has MAF ({:.4} < 0.4) → v1 likely haploid.", p);
+        } else if p1 > 0.4 {
+            // Case 1: Only lower level has high MAF (>0.4)
+            // Coverage ratio sanity check: if v2/v1 >= 1.6, the levels are actually 1n/2n
+            // (the high MAF on lower level is misleading, possibly due to low blast fraction)
+            if v2 / v1 >= 1.6 {
+                debug!(
+                    "MAF suggests v1 is 2n, but ratio >= 1.6. Actually v1=1n, v2=2n. cn2/cn1 = {:.2}",
+                    v2 / v1
+                );
                 return (v1, v2, v2 + (v2 - v1));
             } else {
                 debug!("Only v2 has MAF ({:.4} < 0.4) → v2 likely haploid, v1 is diploid.", p);
                 return (2.0 * v1 - v2, v1, v2);
             }
+        } else if p2 > 0.4 {
+            // Case 2: Only higher level has high MAF (>0.4)
+            debug!(
+                "MAF suggests v2 is 2n (peak > 0.4). v1 likely 1n. cn2/cn1 = {:.2}",
+                v2 / v1
+            );
+            return (v1, v2, v2 + (v2 - v1));
+        } else {
+            // Ambiguous MAF — fall back to ratio logic
+            debug!("MAF ambiguous. Falling back to ratio logic.");
         }
-
-        debug!("No usable MAF peaks. Falling back to ratio logic.");
     }
 
     // heuristic fallback logic

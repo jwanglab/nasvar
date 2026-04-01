@@ -134,7 +134,7 @@ enum Commands {
         /// Path to reference genome configuration JSON file (centromeres, PAR regions).
         #[arg(long, required = true)]
         reference: String,
-        /// GC bias correction method for karyotype inference.
+        /// GC bias correction method for karyotype inference (default: loess).
         #[arg(long, value_enum, default_value_t = nasvar::karyotype::GcCorrectionMethod::Loess)]
         gc_correction: nasvar::karyotype::GcCorrectionMethod,
         /// Minimum read depth at a MAF site for BAF plotting (sites below this are spacers).
@@ -254,8 +254,8 @@ enum Commands {
         /// Path to reference genome configuration JSON file (centromeres, PAR regions).
         #[arg(long, required = true)]
         reference: String,
-        /// GC bias correction method for karyotype inference.
-        #[arg(long, value_enum, default_value_t = nasvar::karyotype::GcCorrectionMethod::Linear)]
+        /// GC bias correction method for karyotype inference (default: loess).
+        #[arg(long, value_enum, default_value_t = nasvar::karyotype::GcCorrectionMethod::Loess)]
         gc_correction: nasvar::karyotype::GcCorrectionMethod,
         /// Minimum read depth at a MAF site for BAF plotting (sites below this are spacers).
         #[arg(long, default_value_t = 20)]
