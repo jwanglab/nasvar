@@ -1359,7 +1359,7 @@ fn resolve_cn_states(
                 );
                 return (v1, v2, v2 + (v2 - v1));
             } else {
-                debug!("Only v2 has MAF ({:.4} < 0.4) → v2 likely haploid, v1 is diploid.", p);
+                debug!("Only v2 has MAF ({:.4} < 0.4) -> v2 likely haploid, v1 is diploid.", v2);
                 return (2.0 * v1 - v2, v1, v2);
             }
         } else if p2 > 0.4 {
