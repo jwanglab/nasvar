@@ -328,10 +328,8 @@ impl Axes {
         }
 
         // Render legend
-        if let Some(ref legend) = self.legend {
-            if legend.visible && !legend.entries.is_empty() {
-                svg.push_str(&self.render_legend(legend, &pixel_bounds));
-            }
+        if let Some(ref legend) = self.legend && legend.visible && !legend.entries.is_empty() {
+            svg.push_str(&self.render_legend(legend, &pixel_bounds));
         }
 
         svg
@@ -547,18 +545,16 @@ impl Axes {
             }
 
             // Draw fill rectangle if available (for bar/histogram) and no line
-            if let Some(ref fill_style) = entry.fill_style {
-                if !has_line && !has_marker {
-                    let rect_size = 10.0;
-                    svg.push_str(&format!(
-                        "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" {}/>\n",
-                        line_mid - rect_size / 2.0,
-                        ey - rect_size / 2.0,
-                        rect_size,
-                        rect_size,
-                        fill_style.to_svg_style()
-                    ));
-                }
+            if let Some(ref fill_style) = entry.fill_style && !has_line && !has_marker {
+                let rect_size = 10.0;
+                svg.push_str(&format!(
+                    "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" {}/>\n",
+                    line_mid - rect_size / 2.0,
+                    ey - rect_size / 2.0,
+                    rect_size,
+                    rect_size,
+                    fill_style.to_svg_style()
+                ));
             }
 
             // Draw marker if available (for scatter plots or line plots with markers)

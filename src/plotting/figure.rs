@@ -123,18 +123,6 @@ impl Figure {
         &mut self.axes
     }
 
-    /// Adjust subplot parameters to give specified padding.
-    pub fn tight_layout(&mut self) {
-        // Simple implementation - just ensure reasonable margins
-        let n = self.axes.len();
-        if n == 0 {
-            return;
-        }
-
-        // For now, just leave the positions as set by add_subplot
-        // A more sophisticated implementation would measure text extents
-    }
-
     /// Render the figure to an SVG string.
     pub fn render(&mut self) -> String {
         let mut backend = SvgBackend::new(self.width, self.height);

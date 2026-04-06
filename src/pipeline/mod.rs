@@ -180,13 +180,11 @@ impl<'a> PipelineRunner<'a> {
         info!("Processed {} reads. Done.", i);
 
         // Adaptive sampling coverage scan (replaces main BAM for coverage)
-        if let Some(ref as_path) = self.as_alignments {
-            if let Some(reps) = &self.coverage_repeats {
-                use crate::var::coverage::scan_as_alignments;
-                info!("Scanning adaptive sampling alignments for coverage...");
-                let as_acc = scan_as_alignments(as_path, &header, reps, self.ref_path.as_deref())?;
-                as_acc.write_output(&format!("{}.coverage.tsv", self.out_prefix), true)?;
-            }
+        if let Some(ref as_path) = self.as_alignments && let Some(reps) = &self.coverage_repeats {
+            use crate::var::coverage::scan_as_alignments;
+            info!("Scanning adaptive sampling alignments for coverage...");
+            let as_acc = scan_as_alignments(as_path, &header, reps, self.ref_path.as_deref())?;
+            as_acc.write_output(&format!("{}.coverage.tsv", self.out_prefix), true)?;
         }
 
         // Write coverage from main BAM (when not using AS alignments)

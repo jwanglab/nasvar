@@ -817,10 +817,8 @@ pub fn compute_seg_bases(
     // Group enriched intervals by chromosome index
     let mut bed_by_idx: Vec<Vec<(u32, u32)>> = vec![Vec::new(); NUM_CHROMOSOMES];
     for region in enriched {
-        if let Some(idx) = mapper.get_chr_index(&region.segment) {
-            if idx < NUM_CHROMOSOMES {
-                bed_by_idx[idx].push((region.start, region.end));
-            }
+        if let Some(idx) = mapper.get_chr_index(&region.segment) && idx < NUM_CHROMOSOMES {
+            bed_by_idx[idx].push((region.start, region.end));
         }
     }
 
@@ -838,10 +836,8 @@ pub fn compute_seg_bases(
         for site in chr_sites {
             let pos = site.pos as u32;
             let in_enriched = intervals.iter().any(|&(start, end)| pos >= start && pos <= end);
-            if in_enriched {
-                if let Some(seg) = get_segment_from_pos(chrom, pos, ref_config) {
-                    *seg_counts.entry(seg).or_insert(0) += 1;
-                }
+            if in_enriched && let Some(seg) = get_segment_from_pos(chrom, pos, ref_config) {
+                *seg_counts.entry(seg).or_insert(0) += 1;
             }
         }
     }
@@ -908,12 +904,10 @@ pub fn call_karyotype(
             let maf_sufficient = if let Some(sb) = seg_bases {
                 let mut sufficient_segs = 0;
                 for (seg, &count) in &maf_counts {
-                    if let Some(&bases) = sb.get(seg) {
-                        if bases > 0 {
-                            let ratio = count as f64 / bases as f64;
-                            if ratio > 0.04 {
-                                sufficient_segs += 1;
-                            }
+                    if let Some(&bases) = sb.get(seg) && bases > 0 {
+                        let ratio = count as f64 / bases as f64;
+                        if ratio > 0.04 {
+                            sufficient_segs += 1;
                         }
                     }
                 }
@@ -1281,18 +1275,16 @@ fn resolve_cn_states(
     // If only 1 level (or very close), assume 2n unless MAF indicates otherwise
     if sorted_levels.len() < 2 || (v2 - v1).abs() < 0.05 {
         // Check MAF
-        if let Some(peaks) = maf_peaks {
-            if let Some(&peak) = peaks.get(&0) {
-                if peak > 0.4 {
-                    debug!("Single level, MAF peak {:.2} confirms 2n", peak);
-                    return (v1 * 0.5, v1, v1 * 1.5);
-                } else {
-                    debug!(
-                        "Single level, MAF peak {:.2} suggests NOT 2n (likely 1n). Setting single level as CN1.",
-                        peak
-                    );
-                    return (v1, v1 * 2.0, v1 * 3.0);
-                }
+        if let Some(peaks) = maf_peaks && let Some(&peak) = peaks.get(&0) {
+            if peak > 0.4 {
+                debug!("Single level, MAF peak {:.2} confirms 2n", peak);
+                return (v1 * 0.5, v1, v1 * 1.5);
+            } else {
+                debug!(
+                    "Single level, MAF peak {:.2} suggests NOT 2n (likely 1n). Setting single level as CN1.",
+                    peak
+                );
+                return (v1, v1 * 2.0, v1 * 3.0);
             }
         }
         // No MAF data available - default to 2n

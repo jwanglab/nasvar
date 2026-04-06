@@ -379,7 +379,7 @@ pub fn scan_as_alignments(
     while let Some(record) = input.read_record()? {
         accumulator.process(&record);
         count += 1;
-        if count % 100_000 == 0 {
+        if count.is_multiple_of(100_000) {
             eprint!("\rAS alignments: {} records...", count);
             std::io::Write::flush(&mut std::io::stderr())?;
         }

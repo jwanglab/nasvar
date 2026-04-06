@@ -96,15 +96,13 @@ impl LinePlot {
         let mut chars = fmt.chars().peekable();
 
         // Parse color (single letter)
-        if let Some(&c) = chars.peek() {
-            if let Some(color) = parse_color_char(c) {
-                self.line_style.color = color.clone();
-                if let Some(ref mut marker) = self.marker_style {
-                    marker.fill = color.clone();
-                    marker.edge_color = color;
-                }
-                chars.next();
+        if let Some(&c) = chars.peek() && let Some(color) = parse_color_char(c) {
+            self.line_style.color = color.clone();
+            if let Some(ref mut marker) = self.marker_style {
+                marker.fill = color.clone();
+                marker.edge_color = color;
             }
+            chars.next();
         }
 
         // Parse line style

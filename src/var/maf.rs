@@ -62,16 +62,14 @@ pub fn read_sites(path: &str) -> Result<Vec<Vec<Site>>, Box<dyn std::error::Erro
 }
 
 /// Remove sites that fall within repeat/masked BED regions.
-pub fn filter_repeat_sites(sites: &mut Vec<Vec<Site>>, repeats: &[BedRegion]) {
+pub fn filter_repeat_sites(sites: &mut [Vec<Site>], repeats: &[BedRegion]) {
     let mapper = ContigMapper::new();
 
     // Group repeat intervals by chromosome index, sorted by start
     let mut repeats_by_chr: Vec<Vec<(usize, usize)>> = vec![Vec::new(); NUM_CHROMOSOMES];
     for r in repeats {
-        if let Some(idx) = mapper.get_chr_index(&r.segment) {
-            if idx < NUM_CHROMOSOMES {
-                repeats_by_chr[idx].push((r.start as usize, r.end as usize));
-            }
+        if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < NUM_CHROMOSOMES {
+            repeats_by_chr[idx].push((r.start as usize, r.end as usize));
         }
     }
     for intervals in &mut repeats_by_chr {

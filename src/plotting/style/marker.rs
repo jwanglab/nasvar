@@ -3,9 +3,10 @@
 use super::color::Color;
 
 /// Marker shapes for data points.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum Marker {
     /// No marker
+    #[default]
     None,
     /// Circle marker
     Circle,
@@ -149,12 +150,6 @@ impl Marker {
     /// Check if this marker should be rendered as a circle element.
     pub fn is_circle(&self) -> bool {
         matches!(self, Marker::Circle)
-    }
-}
-
-impl Default for Marker {
-    fn default() -> Self {
-        Marker::None
     }
 }
 

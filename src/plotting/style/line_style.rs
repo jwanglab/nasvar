@@ -3,9 +3,10 @@
 use super::color::Color;
 
 /// Dash pattern for lines.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum DashPattern {
     /// Solid line
+    #[default]
     Solid,
     /// Dashed line (default dash length)
     Dashed,
@@ -66,12 +67,6 @@ impl DashPattern {
         } else {
             None
         }
-    }
-}
-
-impl Default for DashPattern {
-    fn default() -> Self {
-        DashPattern::Solid
     }
 }
 

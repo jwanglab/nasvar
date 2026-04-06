@@ -269,7 +269,7 @@ impl ContigMapper {
             "Y" => Some(NUM_CHROMOSOMES - 1),
             n => {
                 let num: usize = n.parse().ok()?;
-                if num >= 1 && num <= NUM_CHROMOSOMES - 2 {
+                if (1..=NUM_CHROMOSOMES - 2).contains(&num) {
                     Some(num - 1)
                 } else {
                     None
