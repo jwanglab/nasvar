@@ -179,13 +179,18 @@ impl<'a> PipelineRunner<'a> {
         }
         info!("Processed {} reads. Done.", i);
 
-        // Adaptive sampling coverage scan (replaces main BAM for coverage)
-        if let Some(ref as_path) = self.as_alignments && let Some(reps) = &self.coverage_repeats {
+        // Adaptive sampling coverage scan (replaces main BAM for coverage and reads_aligned)
+        let as_reads_aligned: Option<u64> = if let Some(ref as_path) = self.as_alignments
+            && let Some(reps) = &self.coverage_repeats
+        {
             use crate::var::coverage::scan_as_alignments;
             info!("Scanning adaptive sampling alignments for coverage...");
             let as_acc = scan_as_alignments(as_path, &header, reps, self.ref_path.as_deref())?;
             as_acc.write_output(&format!("{}.coverage.tsv", self.out_prefix), true)?;
-        }
+            Some(as_acc.reads_aligned())
+        } else {
+            None
+        };
 
         // Write coverage from main BAM (when not using AS alignments)
         if let Some(c) = cov_acc {
@@ -197,16 +202,27 @@ impl<'a> PipelineRunner<'a> {
             m.write_output(&format!("{}.maf", self.out_prefix), &header)?;
         }
 
-        // Finalize QC and get reads_aligned
-        // Finalize QC + focal depths (both from QcAccumulator)
+        // Finalize QC and get reads_aligned.
+        // reads_aligned comes from the AS BAM when --as-alignments is provided,
+        // otherwise from the main-BAM QcAccumulator. Target QC stats
+        // (nt_on_target, reads_on_target, focal_depths) always come from the
+        // main BAM regardless of AS.
         let (reads_aligned, focal_depths) = if let Some(q) = qc_acc {
-            let count = q.reads_aligned();
-            info!("Total aligned reads (primary): {}", count);
+            let count = as_reads_aligned.unwrap_or_else(|| q.reads_aligned());
+            if as_reads_aligned.is_some() {
+                info!("Total aligned reads (primary, from AS): {}", count);
+            } else {
+                info!("Total aligned reads (primary): {}", count);
+            }
             let fd = q.focal_depths();
             collector = collector.with_qc(q.to_qc_data());
             collector = collector.with_reads_aligned(count);
             collector = collector.with_target_coverage(fd.clone());
             (Some(count), Some(fd))
+        } else if let Some(count) = as_reads_aligned {
+            info!("Total aligned reads (primary, from AS): {}", count);
+            collector = collector.with_reads_aligned(count);
+            (Some(count), None)
         } else {
             (None, None)
         };
