@@ -271,6 +271,18 @@ pub fn plot_gc_vs_coverage(
             .build();
     }
 
+    // Clip y-axis at 99th percentile of coverage values so extreme outliers
+    // don't compress the bulk of the scatter.
+    let mut all_cov: Vec<f64> = maj_cov.iter().chain(other_cov.iter()).copied().collect();
+    if !all_cov.is_empty() {
+        all_cov.sort_by(|a, b| a.total_cmp(b));
+        let idx = ((all_cov.len() as f64 * 0.99) as usize).min(all_cov.len() - 1);
+        let y_max = all_cov[idx];
+        if y_max > 0.0 {
+            ax.set_ylim(0.0, y_max);
+        }
+    }
+
     ax.set_title(title);
     ax.set_xlabel("GC Content");
     ax.set_ylabel("Coverage (reads/Mbp)");

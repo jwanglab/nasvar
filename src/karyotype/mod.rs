@@ -1456,8 +1456,16 @@ fn linear_regression(xs: &[f64], ys: &[f64]) -> (f64, f64) {
 /// Predict a single value using LOESS (locally weighted linear regression).
 ///
 /// At each query point, selects the nearest `bandwidth` fraction of training data,
-/// applies tricube kernel weights, and fits a local weighted linear regression.
-fn loess_predict_single(xs: &[f64], ys: &[f64], query: f64, bandwidth: f64) -> f64 {
+/// applies tricube kernel weights multiplied by `robust_weights` (per-point
+/// robustness weights in [0, 1]), and fits a local weighted linear regression.
+/// Pass a slice of all-ones to recover classical (non-robust) LOESS.
+fn loess_predict_weighted(
+    xs: &[f64],
+    ys: &[f64],
+    robust_weights: &[f64],
+    query: f64,
+    bandwidth: f64,
+) -> f64 {
     let n = xs.len();
     let k = ((n as f64 * bandwidth).ceil() as usize).max(3).min(n);
 
@@ -1469,20 +1477,30 @@ fn loess_predict_single(xs: &[f64], ys: &[f64], query: f64, bandwidth: f64) -> f
     let max_dist = dists[k - 1].1;
 
     if max_dist < 1e-12 {
-        // All neighbors at same point, return weighted mean
-        let sum: f64 = dists[..k].iter().map(|(i, _)| ys[*i]).sum();
-        return sum / k as f64;
+        // All neighbors at same x — robustness-weighted mean (fallback to simple mean if all zero)
+        let sum_w: f64 = dists[..k].iter().map(|(i, _)| robust_weights[*i]).sum();
+        if sum_w < 1e-12 {
+            let sum: f64 = dists[..k].iter().map(|(i, _)| ys[*i]).sum();
+            return sum / k as f64;
+        }
+        let sum_wy: f64 = dists[..k].iter().map(|(i, _)| robust_weights[*i] * ys[*i]).sum();
+        return sum_wy / sum_w;
     }
 
-    // Tricube kernel weights: w(u) = (1 - |u|^3)^3 for |u| < 1
-    let weights: Vec<f64> = dists[..k].iter().map(|(_, d)| {
+    // Tricube kernel weights × robustness weights: w_i = (1 - |u|^3)^3 * δ_i
+    let weights: Vec<f64> = dists[..k].iter().map(|(i, d)| {
         let u = d / max_dist;
         let t = 1.0 - u * u * u;
-        t * t * t
+        t * t * t * robust_weights[*i]
     }).collect();
 
     // Weighted linear regression
     let sum_w: f64 = weights.iter().sum();
+    if sum_w < 1e-12 {
+        // All neighbors down-weighted to zero — fall back to unweighted y mean
+        let sum: f64 = dists[..k].iter().map(|(i, _)| ys[*i]).sum();
+        return sum / k as f64;
+    }
     let sum_wx: f64 = dists[..k].iter().zip(&weights).map(|((i, _), w)| w * xs[*i]).sum();
     let sum_wy: f64 = dists[..k].iter().zip(&weights).map(|((i, _), w)| w * ys[*i]).sum();
     let sum_wxx: f64 = dists[..k].iter().zip(&weights).map(|((i, _), w)| w * xs[*i] * xs[*i]).sum();
@@ -1498,8 +1516,61 @@ fn loess_predict_single(xs: &[f64], ys: &[f64], query: f64, bandwidth: f64) -> f
     slope * query + intercept
 }
 
+/// Compute Cleveland-style bisquare robustness weights via `n_iter` iterations.
+///
+/// Each iteration:
+///   1. Fit LOESS at each training x using current robustness weights.
+///   2. Compute residuals r_i = y_i - ŷ_i.
+///   3. Set scale s = 6 * median(|r_i|) (Cleveland 1979).
+///   4. Reweight: δ_i = (1 - (r_i/s)^2)^2 for |r_i| < s, else 0.
+///
+/// Returns per-point weights in [0, 1]. Points with large residuals from the
+/// bulk trend (outliers) are driven toward zero, so subsequent fits ignore them.
+fn compute_robust_weights(xs: &[f64], ys: &[f64], bandwidth: f64, n_iter: usize) -> Vec<f64> {
+    let n = xs.len();
+    let mut weights = vec![1.0; n];
+
+    for _ in 0..n_iter {
+        // Predict at each training x with current robustness weights
+        let preds: Vec<f64> = xs.iter()
+            .map(|&x| loess_predict_weighted(xs, ys, &weights, x, bandwidth))
+            .collect();
+
+        // Residuals and scale (6 * median absolute residual)
+        let mut abs_res: Vec<f64> = ys.iter().zip(&preds)
+            .map(|(y, p)| (y - p).abs())
+            .collect();
+        abs_res.sort_by(|a, b| a.total_cmp(b));
+        let median_abs = abs_res[n / 2];
+        let scale = 6.0 * median_abs;
+
+        if scale < 1e-12 {
+            // Near-perfect fit: further iterations won't change anything
+            break;
+        }
+
+        // Bisquare (Tukey) weights
+        for i in 0..n {
+            let r = ys[i] - preds[i];
+            let u = r / scale;
+            weights[i] = if u.abs() < 1.0 {
+                let t = 1.0 - u * u;
+                t * t
+            } else {
+                0.0
+            };
+        }
+    }
+    weights
+}
+
 /// Generate LOESS fitted curve across the typical GC range for plotting.
-fn loess_fit_curve(xs: &[f64], ys: &[f64], bandwidth: f64) -> Vec<(f64, f64)> {
+fn loess_fit_curve(
+    xs: &[f64],
+    ys: &[f64],
+    robust_weights: &[f64],
+    bandwidth: f64,
+) -> Vec<(f64, f64)> {
     let n_points = 50;
     let gc_min = 0.3;
     let gc_max = 0.7;
@@ -1507,13 +1578,14 @@ fn loess_fit_curve(xs: &[f64], ys: &[f64], bandwidth: f64) -> Vec<(f64, f64)> {
     (0..n_points)
         .map(|i| {
             let gc = gc_min + i as f64 * step;
-            let predicted = loess_predict_single(xs, ys, gc, bandwidth);
+            let predicted = loess_predict_weighted(xs, ys, robust_weights, gc, bandwidth);
             (gc, predicted)
         })
         .collect()
 }
 
 const LOESS_BANDWIDTH: f64 = 0.3;
+const LOESS_ROBUST_ITERATIONS: usize = 3;
 const GC_REFERENCE: f64 = 0.41;
 
 /// Apply GC bias correction to coverage bins.
@@ -1584,13 +1656,22 @@ fn gc_correct_coverage(
                 (reference, Box::new(move |gc| m * gc + b), curve)
             }
             GcCorrectionMethod::Loess => {
-                let reference = loess_predict_single(&gc_vals, &cov_vals, GC_REFERENCE, LOESS_BANDWIDTH);
-                let curve = loess_fit_curve(&gc_vals, &cov_vals, LOESS_BANDWIDTH);
-                debug!("GC correction (LOESS): reference={:.4} at GC={}, bandwidth={}, {} bins",
-                    reference, GC_REFERENCE, LOESS_BANDWIDTH, gc_vals.len());
+                let robust_w = compute_robust_weights(
+                    &gc_vals, &cov_vals, LOESS_BANDWIDTH, LOESS_ROBUST_ITERATIONS,
+                );
+                let reference = loess_predict_weighted(
+                    &gc_vals, &cov_vals, &robust_w, GC_REFERENCE, LOESS_BANDWIDTH,
+                );
+                let curve = loess_fit_curve(&gc_vals, &cov_vals, &robust_w, LOESS_BANDWIDTH);
+                let n_down = robust_w.iter().filter(|&&w| w < 0.1).count();
+                debug!("GC correction (robust LOESS): reference={:.4} at GC={}, bandwidth={}, \
+                    {} bins, {} iterations, {} bins down-weighted (w<0.1)",
+                    reference, GC_REFERENCE, LOESS_BANDWIDTH, gc_vals.len(),
+                    LOESS_ROBUST_ITERATIONS, n_down);
                 let xs = gc_vals.clone();
                 let ys = cov_vals.clone();
-                (reference, Box::new(move |gc| loess_predict_single(&xs, &ys, gc, LOESS_BANDWIDTH)), curve)
+                let rw = robust_w;
+                (reference, Box::new(move |gc| loess_predict_weighted(&xs, &ys, &rw, gc, LOESS_BANDWIDTH)), curve)
             }
             GcCorrectionMethod::None => unreachable!(),
         };
