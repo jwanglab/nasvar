@@ -293,21 +293,10 @@ fn process_directory(
         for gene in &config.deletion_genes {
             let del_key = format!("{}_deletions", gene);
             if let Some(g) = cnvs.get(gene.as_str()) {
-                if let Some(deletions) = &g.deletions {
-                    if !deletions.is_empty() {
-                        result.insert(del_key.clone(), format_sv_list(deletions));
-                    } else if let Some(focal) = g.focal {
-                        // Fallback: show focal CN if no deletions detected
-                        result.insert(
-                            del_key.clone(),
-                            format!("{}x  ({:.1}x)", focal.round() as i64, focal),
-                        );
-                    }
-                } else if let Some(focal) = g.focal {
-                    result.insert(
-                        del_key.clone(),
-                        format!("{}x  ({:.1}x)", focal.round() as i64, focal),
-                    );
+                if let Some(deletions) = &g.deletions
+                    && !deletions.is_empty()
+                {
+                    result.insert(del_key.clone(), format_sv_list(deletions));
                 }
             }
             result.entry(del_key).or_default();

@@ -113,10 +113,8 @@ fn generate_karyotype_string(cns: &HashMap<String, usize>) -> String {
         let in_2 = counts.get(&2).is_some_and(|v| {
             v.contains(&s) || v.contains(&sp) || v.contains(&sq)
         });
-        // Check if whole chromosome or any arm is in counts[1]
-        let in_1 = counts.get(&1).is_some_and(|v| {
-            v.contains(&s) || v.contains(&sp) || v.contains(&sq)
-        });
+        // Check if whole chromosome is in counts[1]
+        let in_1 = counts.get(&1).is_some_and(|v| v.contains(&s));
 
         let cn = if in_2 {
             2
@@ -127,7 +125,12 @@ fn generate_karyotype_string(cns: &HashMap<String, usize>) -> String {
         } else {
             let cp = cns.get(&sp).cloned().unwrap_or(2);
             let cq = cns.get(&sq).cloned().unwrap_or(2);
-            std::cmp::min(cp, cq)
+            // If one arm is lost and the other is gained, chromosome contributes 2 to total
+            if (cp < 2 && cq > 2) || (cp > 2 && cq < 2) {
+                2
+            } else {
+                std::cmp::min(cp, cq)
+            }
         };
         chrom_ct += cn;
     }

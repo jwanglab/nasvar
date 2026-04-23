@@ -122,6 +122,12 @@ enum Commands {
         /// Path to MAF file.
         #[arg(long)]
         maf: Option<String>,
+        /// Path to SNP sites file (used with --enriched to check MAF data sufficiency).
+        #[arg(long)]
+        sites: Option<String>,
+        /// Path to enriched regions BED file (used with --sites to check MAF data sufficiency).
+        #[arg(long)]
+        enriched: Option<String>,
         /// Prefix for output files.
         #[arg(long, required = true)]
         out_prefix: String,
@@ -541,6 +547,8 @@ fn main() {
         Commands::Karyotype {
             coverage,
             maf,
+            sites,
+            enriched,
             out_prefix,
             force,
             config,
@@ -574,7 +582,23 @@ fn main() {
             karyo_thresholds.min_depth = *min_depth;
             karyo_thresholds.plot_y_percentile = *plot_y_percentile;
 
-            match nasvar::karyotype::call_karyotype_gc_corrected(coverage, maf.as_deref(), out_prefix, None, &ref_config, &karyo_thresholds, *gc_correction, None) {
+            // Compute seg_bases for MAF sufficiency check if sites and enriched are provided
+            let seg_bases = match (sites, enriched) {
+                (Some(s), Some(e)) => {
+                    let e_vec = match read_bed(e) {
+                        Ok(v) => v,
+                        Err(err) => { error!("Error reading enriched BED {}: {}", e, err); return; }
+                    };
+                    let s_vec = match read_sites(s) {
+                        Ok(v) => v,
+                        Err(err) => { error!("Error reading sites {}: {}", s, err); return; }
+                    };
+                    Some(nasvar::karyotype::compute_seg_bases(&s_vec, &e_vec, &ref_config))
+                }
+                _ => None,
+            };
+
+            match nasvar::karyotype::call_karyotype_gc_corrected(coverage, maf.as_deref(), out_prefix, None, &ref_config, &karyo_thresholds, *gc_correction, seg_bases.as_ref()) {
                 Ok(karyo_output) => {
                     let collector = OutputCollector::new().with_karyotype(karyo_output);
                     if let Err(e) = collector.write_to_prefix(out_prefix) {

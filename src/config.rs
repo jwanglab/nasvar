@@ -471,14 +471,67 @@ pub struct AggregateConfig {
     pub columns: Vec<String>,
 }
 
+impl From<PipelineConfig> for AggregateConfig {
+    fn from(p: PipelineConfig) -> Self {
+        let cnv = &p.genes.cnv;
+        let fusions = &p.genes.fusions;
+        let thresholds = &p.thresholds.fusions;
+
+        let itd_genes = p.genes.itd.iter()
+            .map(|(gene, region)| (gene.clone(), region.label.clone()))
+            .collect();
+
+        let mut snv_genes = p.genes.snv.pharmacogenomics.clone();
+        for g in &p.genes.snv.pathogenic {
+            if !snv_genes.contains(g) {
+                snv_genes.push(g.clone());
+            }
+        }
+
+        let fusion_special_genes = fusions.skip_self_fusions.iter()
+            .map(|g| (g.clone(), FusionSpecialGene { skip_self_fusion: true, bypass_breakpoint_filter: false }))
+            .chain(fusions.bypass_breakpoint_filter.iter().map(|g| (g.clone(), FusionSpecialGene { skip_self_fusion: false, bypass_breakpoint_filter: true })))
+            .fold(HashMap::new(), |mut acc: HashMap<String, FusionSpecialGene>, (gene, special)| {
+                let entry = acc.entry(gene).or_default();
+                entry.skip_self_fusion |= special.skip_self_fusion;
+                entry.bypass_breakpoint_filter |= special.bypass_breakpoint_filter;
+                acc
+            });
+
+        AggregateConfig {
+            itd_genes,
+            cnv_genes: cnv.focal_genes.clone(),
+            local_cn_genes: cnv.local_cn_genes.clone(),
+            deletion_genes: cnv.deletion_genes.clone(),
+            duplication_genes: cnv.duplication_genes.clone(),
+            snv_genes,
+            fusion_blacklist: fusions.blacklist_pairs.clone(),
+            fusion_special_genes,
+            min_supporting_reads: thresholds.min_supporting_reads,
+            min_breakpoint_reads: thresholds.min_breakpoint_reads,
+            columns: vec![],
+        }
+    }
+}
+
 impl AggregateConfig {
-    /// Load aggregate configuration from a JSON file
+    /// Load aggregate configuration from a JSON file.
+    /// Accepts either the flat AggregateConfig format or the full PipelineConfig format
+    /// (detected by the presence of a top-level "genes" key).
     pub fn load(path: &str) -> std::io::Result<Self> {
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        let config: AggregateConfig = serde_json::from_reader(reader)
+        let content = std::fs::read_to_string(path)?;
+        let raw: serde_json::Value = serde_json::from_str(&content)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        Ok(config)
+
+        if raw.get("genes").is_some() {
+            let pipeline: PipelineConfig = serde_json::from_value(raw)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            Ok(AggregateConfig::from(pipeline))
+        } else {
+            let config: AggregateConfig = serde_json::from_value(raw)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            Ok(config)
+        }
     }
 
     /// Check if a fusion pair is blacklisted
