@@ -328,9 +328,14 @@ fn process_directory(
                             } else {
                                 0.0
                             };
+                            let aa_str = match (ins.aa_ref, ins.aa_position) {
+                                (Some(r), Some(p)) => format!(" ({}{})", r, p),
+                                (None, Some(p)) => format!(" (p.{})", p),
+                                _ => String::new(),
+                            };
                             format!(
-                                "{} nt insertion at position {}: {} reads (of {}); {:.2} AR",
-                                ins.length, ins.position, ins.merged, ins.coverage, ar
+                                "{} nt insertion at position {}{}: {} reads (of {}); {:.2} AR",
+                                ins.length, ins.position, aa_str, ins.merged, ins.coverage, ar
                             )
                         })
                         .collect::<Vec<_>>()

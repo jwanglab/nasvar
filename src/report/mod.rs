@@ -470,9 +470,14 @@ fn build_itd_section(md: &mut String, itds: &ItdOutput, config: Option<&Pipeline
                     } else {
                         e.merged as f64 / e.coverage as f64
                     };
+                    let aa_str = match (e.aa_ref, e.aa_position) {
+                        (Some(r), Some(p)) => format!(" ({}{})", r, p),
+                        (None, Some(p)) => format!(" (p.{})", p),
+                        _ => String::new(),
+                    };
                     md.push_str(&format!(
-                        "{} nt insertion at position {}: {} reads (of {}); {:.2} AR\n\n",
-                        e.length, e.position, e.merged, e.coverage, ar
+                        "{} nt insertion at position {}{}: {} reads (of {}); {:.2} AR\n\n",
+                        e.length, e.position, aa_str, e.merged, e.coverage, ar
                     ));
                 }
             }
@@ -1115,7 +1120,12 @@ fn print_stdout_summary(
                 } else {
                     e.merged as f64 / e.coverage as f64
                 };
-                println!("  {}: {}nt at pos {} ({} reads, {:.2} AR)", gene, e.length, e.position, e.merged, ar);
+                let aa_str = match (e.aa_ref, e.aa_position) {
+                        (Some(r), Some(p)) => format!(" {}{}", r, p),
+                        (None, Some(p)) => format!(" p.{}", p),
+                        _ => String::new(),
+                    };
+                println!("  {}: {}nt at pos {}{} ({} reads, {:.2} AR)", gene, e.length, e.position, aa_str, e.merged, ar);
             }
         }
         println!();

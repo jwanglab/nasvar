@@ -52,6 +52,9 @@ pub struct ItdRegion {
     /// Display label for reports/columns (e.g. "ITD", "insertion"). Defaults to "ITD".
     #[serde(default = "default_itd_label")]
     pub label: String,
+    /// Transcript ID for amino acid position reporting (e.g. "rna-NM_004119.3").
+    #[serde(default)]
+    pub transcript: Option<String>,
 }
 
 fn default_min_length() -> isize { 3 }
@@ -327,6 +330,27 @@ impl Default for KaryotypeThresholds {
 }
 
 
+/// A single focal-depth coverage plot specification
+#[derive(Deserialize, Debug, Clone)]
+pub struct FocalDepthPlot {
+    /// Genomic region, e.g. "chr21:11462853-45090682"
+    pub region: String,
+    /// Output filename relative to out_prefix (e.g. "chr21_RUNX1_covg.png")
+    pub output: String,
+    /// Annotation strings, e.g. ["33170406-33432142/RUNX1"]
+    #[serde(default)]
+    pub annotations: Vec<String>,
+    /// Bin size in bp (0 = per-nucleotide depth)
+    #[serde(default)]
+    pub binsize: usize,
+}
+
+/// Focal-depth plot configuration block
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct FocalDepthConfig {
+    pub plots: Vec<FocalDepthPlot>,
+}
+
 /// Main pipeline configuration
 #[derive(Deserialize, Debug, Clone)]
 pub struct PipelineConfig {
@@ -338,6 +362,9 @@ pub struct PipelineConfig {
     /// Threshold configurations
     #[serde(default)]
     pub thresholds: ThresholdConfig,
+    /// Focal depth coverage plots
+    #[serde(default)]
+    pub focal_depth: FocalDepthConfig,
 }
 
 impl PipelineConfig {

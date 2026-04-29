@@ -170,6 +170,7 @@ pub fn plot_karyotype(
     ax.set_ylabel("Reads per Mbp");
     ax.x_axis.tick_positions = Some(tick_positions);
     ax.x_axis.tick_labels = Some(tick_labels);
+    ax.x_axis.tick_label_style.rotation = -90.0;
 
     if let Err(e) = fig.save(out_path) {
         error!("Error saving karyotype plot to {}: {}", out_path, e);
@@ -450,6 +451,7 @@ pub fn plot_karyotype_with_baf(
         ax.set_ylabel("Reads per Mbp");
         ax.x_axis.tick_positions = Some(layout.tick_positions.clone());
         ax.x_axis.tick_labels = Some(layout.tick_labels.clone());
+        ax.x_axis.tick_label_style.rotation = -90.0;
     }
 
     // --- Bottom panel: BAF ---
@@ -489,6 +491,7 @@ pub fn plot_karyotype_with_baf(
         ax.set_ylabel("B-Allele Frequency");
         ax.x_axis.tick_positions = Some(layout.tick_positions.clone());
         ax.x_axis.tick_labels = Some(layout.tick_labels.clone());
+        ax.x_axis.tick_label_style.rotation = -90.0;
     }
 
     if let Err(e) = fig.save(out_path) {

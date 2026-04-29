@@ -414,11 +414,18 @@ impl Axes {
                     ));
 
                     // Label
+                    let label_y = pixel_bounds.y_max + self.x_axis.tick_length + self.x_axis.tick_padding + 10.0;
+                    let rotation = self.x_axis.tick_label_style.rotation;
+                    let (anchor, transform) = if rotation != 0.0 {
+                        ("end", format!(" transform=\"rotate({},{:.2},{:.2})\"", rotation, px, label_y))
+                    } else {
+                        ("middle", String::new())
+                    };
                     svg.push_str(&format!(
-                        "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" {} >{}</text>\n",
-                        px,
-                        pixel_bounds.y_max + self.x_axis.tick_length + self.x_axis.tick_padding + 10.0,
+                        "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"{}\" {}{} >{}</text>\n",
+                        px, label_y, anchor,
                         self.x_axis.tick_label_style.to_svg_attrs(),
+                        transform,
                         label
                     ));
                 }

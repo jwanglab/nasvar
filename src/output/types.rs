@@ -355,6 +355,14 @@ pub struct ItdEvent {
 
     /// Total coverage at the position
     pub coverage: i64,
+
+    /// Amino acid position of the insertion (1-based), if a transcript was configured
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aa_position: Option<i64>,
+
+    /// Reference amino acid at the insertion position (single-letter code)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aa_ref: Option<char>,
 }
 
 // ============================================================================

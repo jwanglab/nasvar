@@ -315,6 +315,21 @@ enum Commands {
         #[arg(long, default_value = "3")]
         min_coverage: u32,
     },
+    /// Plot focal read-depth coverage for configured regions
+    FocalDepth {
+        /// Alignment file (BAM/CRAM/SAM), sorted and indexed.
+        #[arg(long, required = true)]
+        bam: String,
+        /// Reference genome FASTA (required for CRAM input).
+        #[arg(long)]
+        ref_fasta: Option<String>,
+        /// Output directory prefix; plot files are written as <out_prefix>/<filename>.svg.
+        #[arg(long, required = true)]
+        out_prefix: String,
+        /// Path to pipeline configuration JSON (must contain a focal_depth.plots block).
+        #[arg(long, required = true)]
+        config: String,
+    },
     /// Print JSON Schema for unified output format
     Schema {
         /// Write schema to file instead of stdout
@@ -1036,7 +1051,7 @@ fn main() {
 
             // ITD
             timer.start("ITD Detection");
-            let itd_result = match itd::call_itds(&mut br, &itd_cfg) {
+            let itd_result = match itd::call_itds(&mut br, &itd_cfg, Some(gff), Some(fasta)) {
                 Ok(itd_output) => {
                     Some(itd_output)
                 }
@@ -1073,6 +1088,17 @@ fn main() {
                 error!("Error generating report: {}", e);
             }
             timer.end();
+
+            // Focal depth plots
+            if !pipeline_config.focal_depth.plots.is_empty() {
+                timer.start("Focal Depth Plots");
+                for plot_cfg in &pipeline_config.focal_depth.plots {
+                    if let Err(e) = nasvar::var::focal_depth::plot_focal_depth(&mut br, plot_cfg, out_prefix) {
+                        error!("Error plotting focal depth {}: {}", plot_cfg.region, e);
+                    }
+                }
+                timer.end();
+            }
         }
 
         Commands::Itd {
@@ -1106,7 +1132,7 @@ fn main() {
                 error!("{}", e);
                 return;
             }
-            match itd::call_itds(&mut br, &itd_cfg) {
+            match itd::call_itds(&mut br, &itd_cfg, None, ref_fasta.as_deref()) {
                 Ok(itd_output) => {
                     let collector = OutputCollector::new().with_itd(itd_output);
                     if let Err(e) = collector.write_to_prefix(out_prefix) {
@@ -1198,6 +1224,39 @@ fn main() {
                     }
                 }
                 Err(e) => error!("Error building breakpoint consensus: {}", e),
+            }
+        }
+
+        Commands::FocalDepth {
+            bam,
+            ref_fasta,
+            out_prefix,
+            config,
+        } => {
+            let pipeline_config = match PipelineConfig::load(config) {
+                Ok(c) => c,
+                Err(e) => { error!("Error loading config {}: {}", config, e); return; }
+            };
+
+            let plots = &pipeline_config.focal_depth.plots;
+            if plots.is_empty() {
+                warn!("No focal_depth plots defined in config.");
+                return;
+            }
+
+            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref()) {
+                Ok(b) => b,
+                Err(e) => { error!("Error opening BAM: {}", e); return; }
+            };
+            if let Err(e) = br.require_index(bam) {
+                error!("{}", e);
+                return;
+            }
+
+            for plot_cfg in plots {
+                if let Err(e) = nasvar::var::focal_depth::plot_focal_depth(&mut br, plot_cfg, out_prefix) {
+                    error!("Error plotting {}: {}", plot_cfg.region, e);
+                }
             }
         }
 

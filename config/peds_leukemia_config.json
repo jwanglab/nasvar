@@ -15,7 +15,8 @@
         "end": 27256588,
         "min_length": 3,
         "min_frequency": 0.05,
-        "min_supporting_reads": 2
+        "min_supporting_reads": 2,
+        "transcript": "rna-NM_004119.3"
       },
       "UBTF": {
         "chrom": "NC_060941.1",
@@ -23,7 +24,8 @@
         "end": 45064050,
         "min_length": 3,
         "min_frequency": 0.05,
-        "min_supporting_reads": 2
+        "min_supporting_reads": 2,
+        "transcript": "rna-NM_014233.4"
       },
       "NPM1": {
         "chrom": "NC_060929.1",
@@ -32,7 +34,8 @@
         "min_length": 4,
         "min_frequency": 0.05,
         "min_supporting_reads": 2,
-        "label": "insertion"
+        "label": "insertion",
+        "transcript": "rna-NM_002520.7"
       },
       "CEBPA": {
         "chrom": "NC_060943.1",
@@ -41,7 +44,8 @@
         "min_length": 3,
         "min_frequency": 0.2,
         "min_supporting_reads": 3,
-        "label": "insertion"
+        "label": "insertion",
+        "transcript": "rna-NM_004364.5"
       }
     },
     "snv": {
@@ -112,6 +116,17 @@
         "gene2": "ETV6"
       }
     }
+  },
+
+  "focal_depth": {
+    "plots": [
+      {
+        "region": "chr21:11462853-45090682",
+        "output": "chr21_RUNX1_covg.png",
+        "annotations": ["33170406-33432142/RUNX1"],
+        "binsize": 100000
+      }
+    ]
   },
 
   "thresholds": {
