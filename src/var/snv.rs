@@ -553,14 +553,14 @@ pub fn call_snvs(
         }
 
         // Output
-        let mut phase_output = HashMap::new();
-        for (k, v) in phasing_map {
+        let mut phase_output: HashMap<String, &str> = HashMap::new();
+        for ((p1, p2), v) in phasing_map {
             let val = match v {
                 Some(true) => "alt/alt",
                 Some(false) => "ref/alt",
                 None => "?",
             };
-            phase_output.insert(k, val);
+            phase_output.insert(format!("{}-{}", p1, p2), val);
         }
 
         let mutations_dict: HashMap<String, String> = muts
