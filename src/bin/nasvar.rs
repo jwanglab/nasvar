@@ -18,7 +18,7 @@ use nasvar::var::snv::call_snvs;
 use nasvar::utils::annotation::PartnerGeneIndex;
 
 #[derive(Parser)]
-#[command(name = "nasvar")]
+#[command(name = "nasvar", version)]
 #[command(
     about = "Nanopore Adaptive Sample VARiant caller",
     long_about = "A targeted variant caller for long-read sequencing with a focus on human tumor-only data, supporting SNVs, CNVs, fusions, and more."
