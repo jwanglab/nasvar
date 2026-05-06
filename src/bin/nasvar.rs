@@ -385,10 +385,11 @@ fn check_output_paths(
 // noodles::bam::io::reader::Builder returns Reader<File> (which is Reader<std::io::Reader<File>>)
 
 fn get_alignment_reader(path: &str, ref_path: Option<&str>) -> Result<AlignmentInput, Box<dyn std::error::Error>> {
-    let reader = AlignmentInput::open(path, ref_path).map_err(|e| {
-        std::io::Error::other(format!("Error opening alignment file {}: {}", path, e))
-    })?;
-    Ok(reader)
+    // AlignmentInput::open already includes file paths in its errors; flatten
+    // the anyhow chain so the underlying cause (e.g. missing FASTA index) is
+    // not relabeled as a BAM error.
+    AlignmentInput::open(path, ref_path)
+        .map_err(|e| -> Box<dyn std::error::Error> { format!("{:#}", e).into() })
 }
 
 struct StepTimer {

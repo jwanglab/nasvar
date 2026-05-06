@@ -236,9 +236,7 @@ pub fn plot_focal_depth(
     }
 
     // Output: {out_prefix}.{filename}.svg  (flat prefix convention, .png -> .svg)
-    let stem = if plot_cfg.output.ends_with(".png") {
-        &plot_cfg.output[..plot_cfg.output.len() - 4]
-    } else if plot_cfg.output.ends_with(".svg") {
+    let stem = if plot_cfg.output.ends_with(".png") || plot_cfg.output.ends_with(".svg") {
         &plot_cfg.output[..plot_cfg.output.len() - 4]
     } else {
         &plot_cfg.output

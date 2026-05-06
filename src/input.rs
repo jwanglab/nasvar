@@ -596,15 +596,25 @@ impl AlignmentInput {
 
     /// Build a FASTA repository from an optional reference path.
     fn build_fasta_repo(ref_path: Option<&str>) -> Result<Option<fasta::Repository>> {
-        if let Some(rp) = ref_path {
-            let indexed_reader = fasta::io::indexed_reader::Builder::default()
-                .build_from_path(rp)
-                .map_err(|e| anyhow::anyhow!("Failed to open FASTA reference {}: {}", rp, e))?;
-            let adapter = fasta::repository::adapters::IndexedReader::new(indexed_reader);
-            Ok(Some(fasta::Repository::new(adapter)))
-        } else {
-            Ok(None)
+        let Some(rp) = ref_path else { return Ok(None); };
+
+        if !std::path::Path::new(rp).exists() {
+            bail!("FASTA reference file not found: {}", rp);
         }
+        let fai_path = format!("{}.fai", rp);
+        if !std::path::Path::new(&fai_path).exists() {
+            bail!(
+                "FASTA index not found: {} (FASTA itself exists at {}). \
+                 Create one with: samtools faidx {}",
+                fai_path, rp, rp
+            );
+        }
+
+        let indexed_reader = fasta::io::indexed_reader::Builder::default()
+            .build_from_path(rp)
+            .map_err(|e| anyhow::anyhow!("Failed to read FASTA reference {} (index {}): {}", rp, fai_path, e))?;
+        let adapter = fasta::repository::adapters::IndexedReader::new(indexed_reader);
+        Ok(Some(fasta::Repository::new(adapter)))
     }
 
     /// Validate that two headers have identical reference sequences.

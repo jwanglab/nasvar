@@ -294,42 +294,40 @@ pub fn call_itds(
         }
 
         // Annotate amino acid positions if a transcript is configured
-        if let Some(transcript) = region.transcript.as_deref() {
-            if let Some(gff) = gff_path {
-                match get_gene_annotation(name, gff, Some(transcript)) {
-                    Ok(ann) => {
-                        if let Some(strand) = ann.strand {
-                            let mut cds = ann.cds_list.clone();
-                            cds.sort_by_key(|&(s, _)| s);
-                            let chrom_str = ann.chrom_bytes
-                                .as_ref()
-                                .and_then(|b| std::str::from_utf8(b).ok())
-                                .map(|s| s.to_string());
+        if let Some(transcript) = region.transcript.as_deref() && let Some(gff) = gff_path {
+            match get_gene_annotation(name, gff, Some(transcript)) {
+                Ok(ann) => {
+                    if let Some(strand) = ann.strand {
+                        let mut cds = ann.cds_list.clone();
+                        cds.sort_by_key(|&(s, _)| s);
+                        let chrom_str = ann.chrom_bytes
+                            .as_ref()
+                            .and_then(|b| std::str::from_utf8(b).ok())
+                            .map(|s| s.to_string());
 
-                            // Derive FASTA chromosome name from FAI if available
-                            let fasta_chrom = fasta_path.and_then(|fp| {
-                                chrom_str.as_ref().map(|chrom| {
-                                    let fai_path = format!("{}.fai", fp);
-                                    let mapper = ContigMapper::from_fai(&fai_path)
-                                        .unwrap_or_else(|_| bam.contig_mapper.clone());
-                                    mapper.to_bam_name(chrom)
-                                })
-                            });
+                        // Derive FASTA chromosome name from FAI if available
+                        let fasta_chrom = fasta_path.and_then(|fp| {
+                            chrom_str.as_ref().map(|chrom| {
+                                let fai_path = format!("{}.fai", fp);
+                                let mapper = ContigMapper::from_fai(&fai_path)
+                                    .unwrap_or_else(|_| bam.contig_mapper.clone());
+                                mapper.to_bam_name(chrom)
+                            })
+                        });
 
-                            for event in &mut events {
-                                if let Some((aa_pos, cds_offset)) =
-                                    genomic_pos_to_aa(event.position, &cds, strand)
-                                {
-                                    event.aa_position = Some(aa_pos);
-                                    if let (Some(fp), Some(fchrom)) = (fasta_path, &fasta_chrom) {
-                                        event.aa_ref = fetch_codon(cds_offset, &cds, strand, fp, fchrom);
-                                    }
+                        for event in &mut events {
+                            if let Some((aa_pos, cds_offset)) =
+                                genomic_pos_to_aa(event.position, &cds, strand)
+                            {
+                                event.aa_position = Some(aa_pos);
+                                if let (Some(fp), Some(fchrom)) = (fasta_path, &fasta_chrom) {
+                                    event.aa_ref = fetch_codon(cds_offset, &cds, strand, fp, fchrom);
                                 }
                             }
                         }
                     }
-                    Err(e) => warn!("Could not get annotation for {} ({}): {}", name, transcript, e),
                 }
+                Err(e) => warn!("Could not get annotation for {} ({}): {}", name, transcript, e),
             }
         }
 

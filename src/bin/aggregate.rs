@@ -292,12 +292,8 @@ fn process_directory(
         // Deletion genes
         for gene in &config.deletion_genes {
             let del_key = format!("{}_deletions", gene);
-            if let Some(g) = cnvs.get(gene.as_str()) {
-                if let Some(deletions) = &g.deletions
-                    && !deletions.is_empty()
-                {
-                    result.insert(del_key.clone(), format_sv_list(deletions));
-                }
+            if let Some(g) = cnvs.get(gene.as_str()) && let Some(deletions) = &g.deletions && !deletions.is_empty() {
+                result.insert(del_key.clone(), format_sv_list(deletions));
             }
             result.entry(del_key).or_default();
         }
