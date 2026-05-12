@@ -2,6 +2,7 @@ use std::path::Path;
 use clap::{Parser, Subcommand, ValueEnum};
 use log::{info, warn, error};
 
+#[cfg(feature = "jemalloc")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 

@@ -11,6 +11,7 @@ use log::info;
 
 use noodles::bam;
 use noodles::bgzf;
+#[cfg(feature = "cram")]
 use noodles::cram;
 use noodles::csi::binning_index::{
     Indexer as CsiIndexer,
@@ -358,7 +359,9 @@ fn update_inline_index(
 enum Inner {
     Bam(bam::io::IndexedReader<bgzf::io::Reader<File>>),
     BamNoIndex(bam::io::Reader<bgzf::io::Reader<BufReader<File>>>),
+    #[cfg(feature = "cram")]
     Cram(cram::io::IndexedReader<File>),
+    #[cfg(feature = "cram")]
     CramNoIndex(cram::io::Reader<BufReader<File>>),
     Sam(sam::io::Reader<BufReader<File>>),
 }
@@ -367,7 +370,9 @@ enum Inner {
 struct ReaderState {
     inner: Inner,
     file_path: String,
+    #[cfg_attr(not(feature = "cram"), allow(dead_code))]
     fasta_repo: fasta::Repository,
+    #[cfg(feature = "cram")]
     cram_record_buf: std::collections::VecDeque<AlignmentRecord>,
     /// File size in bytes (cached on open for progress tracking)
     file_size: u64,
@@ -452,6 +457,7 @@ impl ReaderState {
     /// Read the next record from this reader.
     fn read_record_inner(&mut self, sam_header: &sam::Header) -> Result<Option<AlignmentRecord>> {
         // For CRAM, use the record buffer
+        #[cfg(feature = "cram")]
         if matches!(self.inner, Inner::Cram(_) | Inner::CramNoIndex(_)) {
             if self.cram_record_buf.is_empty() {
                 self.fill_cram_buffer(sam_header)?;
@@ -503,11 +509,13 @@ impl ReaderState {
                     Err(e) => Err(e.into()),
                 }
             }
+            #[cfg(feature = "cram")]
             _ => unreachable!(),
         }
     }
 
     /// Fill the CRAM record buffer by reading and decoding the next container.
+    #[cfg(feature = "cram")]
     fn fill_cram_buffer(&mut self, sam_header: &sam::Header) -> Result<()> {
         let mut container = cram::io::reader::Container::default();
 
@@ -554,6 +562,7 @@ impl ReaderState {
                     })
                     .collect::<Result<Vec<_>>>()
             }
+            #[cfg(feature = "cram")]
             Inner::Cram(r) => {
                 r.query(sam_header, region)?
                     .map(|result| -> Result<AlignmentRecord> {
@@ -571,7 +580,9 @@ impl ReaderState {
         match &self.inner {
             Inner::Bam(r) => r.get_ref().virtual_position().compressed(),
             Inner::BamNoIndex(r) => r.get_ref().virtual_position().compressed(),
-            Inner::Cram(_) | Inner::CramNoIndex(_) | Inner::Sam(_) => 0,
+            #[cfg(feature = "cram")]
+            Inner::Cram(_) | Inner::CramNoIndex(_) => 0,
+            Inner::Sam(_) => 0,
         }
     }
 
@@ -590,6 +601,7 @@ impl ReaderState {
             self.inner = Inner::Sam(reader);
             return Ok(());
         }
+        #[cfg(feature = "cram")]
         if self.is_cram() {
             self.cram_record_buf.clear();
             let repo = self.fasta_repo.clone();
@@ -610,40 +622,48 @@ impl ReaderState {
                 reader.read_header()?;
                 self.inner = Inner::CramNoIndex(reader);
             }
+            return Ok(());
+        }
+        let index_path = format!("{}.bai", path);
+        if std::path::Path::new(&index_path).exists() {
+            let mut reader = bam::io::indexed_reader::Builder::default()
+                .build_from_path(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to re-open BAM {}: {}", path, e))?;
+            reader.read_header()?;
+            self.inner = Inner::Bam(reader);
+        } else if let Some(cached) = self.inline_built_index.as_ref() {
+            // An inline BAI was built during a previous pass. Re-open
+            // with it so seek(0) doesn't downgrade us back to BamNoIndex
+            // and break subsequent `query()` calls.
+            let file = File::open(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to re-open BAM {}: {}", path, e))?;
+            let mut reader = bam::io::IndexedReader::new(file, cached.clone());
+            reader.read_header()?;
+            self.inner = Inner::Bam(reader);
         } else {
-            let index_path = format!("{}.bai", path);
-            if std::path::Path::new(&index_path).exists() {
-                let mut reader = bam::io::indexed_reader::Builder::default()
-                    .build_from_path(&path)
-                    .map_err(|e| anyhow::anyhow!("Failed to re-open BAM {}: {}", path, e))?;
-                reader.read_header()?;
-                self.inner = Inner::Bam(reader);
-            } else if let Some(cached) = self.inline_built_index.as_ref() {
-                // An inline BAI was built during a previous pass. Re-open
-                // with it so seek(0) doesn't downgrade us back to BamNoIndex
-                // and break subsequent `query()` calls.
-                let file = File::open(&path)
-                    .map_err(|e| anyhow::anyhow!("Failed to re-open BAM {}: {}", path, e))?;
-                let mut reader = bam::io::IndexedReader::new(file, cached.clone());
-                reader.read_header()?;
-                self.inner = Inner::Bam(reader);
-            } else {
-                let file = File::open(&path)
-                    .map_err(|e| anyhow::anyhow!("Failed to re-open BAM {}: {}", path, e))?;
-                let mut reader = bam::io::Reader::new(BufReader::new(file));
-                reader.read_header()?;
-                self.inner = Inner::BamNoIndex(reader);
-            }
+            let file = File::open(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to re-open BAM {}: {}", path, e))?;
+            let mut reader = bam::io::Reader::new(BufReader::new(file));
+            reader.read_header()?;
+            self.inner = Inner::BamNoIndex(reader);
         }
         Ok(())
     }
 
+    #[cfg(feature = "cram")]
     fn is_cram(&self) -> bool {
         matches!(self.inner, Inner::Cram(_) | Inner::CramNoIndex(_))
     }
 
     fn has_index(&self) -> bool {
-        matches!(self.inner, Inner::Bam(_) | Inner::Cram(_))
+        #[cfg(feature = "cram")]
+        {
+            matches!(self.inner, Inner::Bam(_) | Inner::Cram(_))
+        }
+        #[cfg(not(feature = "cram"))]
+        {
+            matches!(self.inner, Inner::Bam(_))
+        }
     }
 }
 
@@ -683,13 +703,7 @@ impl AlignmentInput {
     fn open_single(path: &str, ref_path: Option<&str>) -> Result<Self> {
         let fasta_repo = Self::build_fasta_repo(ref_path)?;
 
-        let (reader_state, sam_header, header) = if Self::is_sam_file(path) {
-            Self::open_sam_reader(path)?
-        } else if Self::is_cram_file(path) {
-            Self::open_cram_reader(path, fasta_repo)?
-        } else {
-            Self::open_bam_reader(path, fasta_repo)?
-        };
+        let (reader_state, sam_header, header) = Self::open_any_reader(path, fasta_repo)?;
 
         let contig_mapper = ContigMapper::from_refs(&header.refs);
 
@@ -799,6 +813,7 @@ impl AlignmentInput {
 
     /// Detect whether a file is CRAM by reading the first 4 magic bytes ("CRAM"),
     /// falling back to file extension if the file can't be read.
+    #[cfg(feature = "cram")]
     fn is_cram_file(path: &str) -> bool {
         if let Ok(mut f) = File::open(path) {
             let mut magic = [0u8; 4];
@@ -812,12 +827,13 @@ impl AlignmentInput {
     /// Open any alignment file (SAM, BAM, or CRAM) based on auto-detection.
     fn open_any_reader(path: &str, fasta_repo: Option<fasta::Repository>) -> Result<(ReaderState, sam::Header, AlignmentHeader)> {
         if Self::is_sam_file(path) {
-            Self::open_sam_reader(path)
-        } else if Self::is_cram_file(path) {
-            Self::open_cram_reader(path, fasta_repo)
-        } else {
-            Self::open_bam_reader(path, fasta_repo)
+            return Self::open_sam_reader(path);
         }
+        #[cfg(feature = "cram")]
+        if Self::is_cram_file(path) {
+            return Self::open_cram_reader(path, fasta_repo);
+        }
+        Self::open_bam_reader(path, fasta_repo)
     }
 
     /// Open a single SAM file, returning the ReaderState, sam::Header, and AlignmentHeader.
@@ -835,6 +851,7 @@ impl AlignmentInput {
             inner: Inner::Sam(reader),
             file_path: path.to_string(),
             fasta_repo: fasta::Repository::default(),
+            #[cfg(feature = "cram")]
             cram_record_buf: std::collections::VecDeque::new(),
             file_size,
             inline_indexer: None,
@@ -864,6 +881,7 @@ impl AlignmentInput {
                 inner: Inner::Bam(reader),
                 file_path: path.to_string(),
                 fasta_repo: fasta::Repository::default(),
+                #[cfg(feature = "cram")]
                 cram_record_buf: std::collections::VecDeque::new(),
                 file_size,
                 inline_indexer: None,
@@ -882,6 +900,7 @@ impl AlignmentInput {
                 inner: Inner::BamNoIndex(reader),
                 file_path: path.to_string(),
                 fasta_repo: fasta::Repository::default(),
+                #[cfg(feature = "cram")]
                 cram_record_buf: std::collections::VecDeque::new(),
                 file_size,
                 inline_indexer: None,
@@ -894,6 +913,7 @@ impl AlignmentInput {
     }
 
     /// Open a single CRAM file, returning the ReaderState, sam::Header, and AlignmentHeader.
+    #[cfg(feature = "cram")]
     fn open_cram_reader(path: &str, fasta_repo: Option<fasta::Repository>) -> Result<(ReaderState, sam::Header, AlignmentHeader)> {
         let file_size = std::fs::metadata(path)
             .map_err(|e| anyhow::anyhow!("Failed to stat CRAM {}: {}", path, e))?
@@ -1060,7 +1080,14 @@ impl AlignmentInput {
 
     /// Returns true if any reader is CRAM.
     pub fn is_cram(&self) -> bool {
-        self.readers.iter().any(|r| r.is_cram())
+        #[cfg(feature = "cram")]
+        {
+            self.readers.iter().any(|r| r.is_cram())
+        }
+        #[cfg(not(feature = "cram"))]
+        {
+            false
+        }
     }
 
     /// Returns true if all readers have an index file.
@@ -1096,11 +1123,14 @@ impl AlignmentInput {
         if self.readers.len() == 1 {
             // Single-file mode: original error message
             if !self.readers[0].has_index() {
+                #[cfg(feature = "cram")]
                 let expected = if self.readers[0].is_cram() {
                     format!("{}.crai", self.readers[0].file_path)
                 } else {
                     format!("{}.bai", self.readers[0].file_path)
                 };
+                #[cfg(not(feature = "cram"))]
+                let expected = format!("{}.bai", self.readers[0].file_path);
                 bail!(
                     "Index file not found for '{}'. Expected '{}'. \
                      Create one with 'samtools index'.",
