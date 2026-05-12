@@ -38,6 +38,12 @@ pub struct PipelineRunner<'a> {
     config: Option<&'a PipelineConfig>,
     // Adaptive sampling alignments — replaces main BAM for coverage
     as_alignments: Option<String>,
+    // GFF path used for variant-region BAM slicing (gene bounds for fusion
+    // partners + chrom lookup for SNV/ITD genes). Required for slicing.
+    gff_path: Option<String>,
+    // When true (default), emit a <prefix>.slice.bam + .bai with reads
+    // around called variants for inclusion in result-package exports.
+    export_slice_bam: bool,
 }
 
 impl<'a> PipelineRunner<'a> {
@@ -54,6 +60,8 @@ impl<'a> PipelineRunner<'a> {
             fusion_partner_index: None,
             config: None,
             as_alignments: None,
+            gff_path: None,
+            export_slice_bam: true,
         }
     }
 
@@ -98,8 +106,23 @@ impl<'a> PipelineRunner<'a> {
         self
     }
 
+    pub fn with_gff_path(mut self, gff_path: Option<String>) -> Self {
+        self.gff_path = gff_path;
+        self
+    }
+
+    pub fn with_export_slice_bam(mut self, on: bool) -> Self {
+        self.export_slice_bam = on;
+        self
+    }
+
     pub fn run(self) -> Result<PipelineResult, Box<dyn std::error::Error>> {
         info!("Starting Pipeline...");
+
+        // Snapshot fusion_targets here — fusion calling later in this
+        // function consumes self.fusion_targets, but the variant-region
+        // slice at the end needs them for the partner-gene bounds lookup.
+        let fusion_targets_for_slice: Option<Vec<BedRegion>> = self.fusion_targets.clone();
 
         let mut bam = AlignmentInput::open(&self.bam_path, self.ref_path.as_deref())?;
         let header = bam.header.clone();
@@ -298,8 +321,29 @@ impl<'a> PipelineRunner<'a> {
         // Write unified output
         collector.write_to_prefix(&self.out_prefix)?;
 
+        let unified = collector.build();
+
+        // Variant-region slice BAM. Best-effort: log and continue on failure
+        // since this is a packaging convenience, not a pipeline result.
+        if self.export_slice_bam {
+            match self.gff_path.as_deref() {
+                Some(gff) => {
+                    if let Err(e) = crate::var::slice::dump_variant_slice(
+                        &unified, &self.bam_path, gff,
+                        fusion_targets_for_slice.as_deref(),
+                        &self.out_prefix,
+                    ) {
+                        log::warn!("[slice] dump failed: {}", e);
+                    }
+                }
+                None => {
+                    log::info!("[slice] skipping — no GFF path supplied (use with_gff_path)");
+                }
+            }
+        }
+
         Ok(PipelineResult {
-            output: collector.build(),
+            output: unified,
             reads_aligned,
             focal_depths,
         })

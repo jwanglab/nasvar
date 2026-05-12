@@ -965,7 +965,8 @@ fn main() {
                 .with_one_sided(os_set.clone())
                 .with_partner_index(partner_index.clone())
                 .with_config(&pipeline_config)
-                .with_as_alignments(as_alignments.clone());
+                .with_as_alignments(as_alignments.clone())
+                .with_gff_path(Some(gff.clone()));
 
             let (pipeline_output, reads_aligned, focal_depths) = match runner.run() {
                 Ok(r) => (r.output, r.reads_aligned, r.focal_depths),
