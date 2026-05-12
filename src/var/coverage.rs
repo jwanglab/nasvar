@@ -1,12 +1,54 @@
 use bitvec::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 
 use crate::bam::ContigMapper;
 use crate::input::{AlignmentInput, AlignmentHeader, AlignmentRecord};
 use crate::utils::bed::BedRegion;
-use log::{info, debug};
+use log::{info, debug, warn};
+
+/// Pre-computed per-bin GC content loaded from a TSV (chrom, bin_start,
+/// bin_end, gc_content). Used to bypass FASTA-based `compute_gc_content`
+/// when a complete reference isn't shipped (e.g. the browser bundle uses a
+/// sparse FASTA). Keyed on (chrom, bin_index) where bin_index = start / bin_size.
+pub type GcBinMap = HashMap<(String, usize), f32>;
+
+/// Load a pre-computed GC-per-bin TSV. File format (tab-separated):
+///   chromosome<TAB>bin_start<TAB>bin_end<TAB>gc_content
+/// Header line starting with "chromosome" is skipped. NaN / "NA" entries
+/// are accepted and stored as NaN so the downstream correction knows to
+/// skip them.
+pub fn load_gc_bins(path: &str, bin_size: usize) -> Result<GcBinMap, Box<dyn std::error::Error>> {
+    let file = File::open(path)
+        .map_err(|e| std::io::Error::other(format!("Error opening GC bins file {}: {}", path, e)))?;
+    let reader = BufReader::new(file);
+    let mut map: GcBinMap = HashMap::new();
+    for (lineno, line) in reader.lines().enumerate() {
+        let l = line?;
+        if l.trim().is_empty() || l.starts_with('#') || l.starts_with("chromosome") {
+            continue;
+        }
+        let parts: Vec<&str> = l.split('\t').collect();
+        if parts.len() < 4 {
+            warn!("gc_bins line {}: expected 4+ columns, got {}; skipping", lineno + 1, parts.len());
+            continue;
+        }
+        let chrom = parts[0].to_string();
+        let start: usize = parts[1].parse()
+            .map_err(|e| format!("gc_bins line {}: bad start: {}", lineno + 1, e))?;
+        let gc: f32 = if parts[3] == "NA" || parts[3] == "NaN" {
+            f32::NAN
+        } else {
+            parts[3].parse()
+                .map_err(|e| format!("gc_bins line {}: bad gc value: {}", lineno + 1, e))?
+        };
+        let bin_idx = start / bin_size;
+        map.insert((chrom, bin_idx), gc);
+    }
+    info!("Loaded {} pre-computed GC bins from {}", map.len(), path);
+    Ok(map)
+}
 
 // ==================== Shared CoverageAccumulator ====================
 // Used by both standalone read_depth() and pipeline mode
@@ -29,9 +71,36 @@ pub struct CoverageAccumulator {
     reads_aligned: u64,
 }
 
+fn lookup_gc_bins(gc: &GcBinMap, mapped_name: &str, n_bins: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(n_bins);
+    let mut hits = 0usize;
+    for i in 0..n_bins {
+        match gc.get(&(mapped_name.to_string(), i)) {
+            Some(&v) => { out.push(v); hits += 1; }
+            None => out.push(f32::NAN),
+        }
+    }
+    debug!("gc_bins: {} has {}/{} bins with pre-computed GC", mapped_name, hits, n_bins);
+    out
+}
+
 impl CoverageAccumulator {
     /// Create new accumulator with repeat masks and optional GC content.
     pub fn new(header: &AlignmentHeader, repeats: &[BedRegion], ref_path: Option<&str>) -> Self {
+        Self::new_with_gc(header, repeats, ref_path, None)
+    }
+
+    /// Like `new`, but if `gc_bins` is Some, pre-computed GC values are used
+    /// instead of scanning the FASTA. Keys in `gc_bins` are (mapped_name,
+    /// bin_index) where mapped_name is the chr-style name (e.g. "chr1") and
+    /// bin_index = start_bp / bin_size. Used by the browser-bundle path
+    /// where the shipped FASTA is sparse (mostly N).
+    pub fn new_with_gc(
+        header: &AlignmentHeader,
+        repeats: &[BedRegion],
+        ref_path: Option<&str>,
+        gc_bins: Option<&GcBinMap>,
+    ) -> Self {
         info!("Initializing coverage accumulator...");
         let bin_size = 1_000_000;
         let mut repeats_map: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
@@ -106,10 +175,16 @@ impl CoverageAccumulator {
                     *bin_count = count;
                 }
 
-                // Compute per-bin GC content from unmasked bases
-                let bin_gc_content = Self::compute_gc_content(
-                    &mut fasta_reader, name, fasta_mapper.as_ref(), len, n_bins, bin_size, &mask,
-                );
+                // Per-bin GC content: prefer pre-computed table if supplied
+                // (exact bin-level GC from a full reference), otherwise scan
+                // the FASTA. The table is keyed by (mapped_name, bin_index).
+                let bin_gc_content = if let Some(gc) = gc_bins {
+                    lookup_gc_bins(gc, &mapped_name, n_bins)
+                } else {
+                    Self::compute_gc_content(
+                        &mut fasta_reader, name, fasta_mapper.as_ref(), len, n_bins, bin_size, &mask,
+                    )
+                };
 
                 chroms.push(Some(ChromData {
                     name: name.clone(),
@@ -131,9 +206,13 @@ impl CoverageAccumulator {
                     })
                     .collect();
 
-                // Skip GC content for chromosomes without repeats (much faster)
-                // GC will be NA for these bins
-                let bin_gc_content = vec![f32::NAN; n_bins];
+                // GC: table lookup if supplied; otherwise NaN (no repeats means
+                // we skipped GC-from-FASTA for speed — same as before).
+                let bin_gc_content = if let Some(gc) = gc_bins {
+                    lookup_gc_bins(gc, &mapped_name, n_bins)
+                } else {
+                    vec![f32::NAN; n_bins]
+                };
 
                 chroms.push(Some(ChromData {
                     name: name.clone(),
@@ -368,6 +447,17 @@ pub fn scan_as_alignments(
     ref_path: Option<&str>,
 ) -> Result<CoverageAccumulator, Box<dyn std::error::Error>>
 {
+    scan_as_alignments_with_gc(path, bam_header, repeats, ref_path, None)
+}
+
+pub fn scan_as_alignments_with_gc(
+    path: &str,
+    bam_header: &AlignmentHeader,
+    repeats: &[BedRegion],
+    ref_path: Option<&str>,
+    gc_bins: Option<&GcBinMap>,
+) -> Result<CoverageAccumulator, Box<dyn std::error::Error>>
+{
     info!("Scanning adaptive sampling alignments: {}", path);
 
     let mut input = AlignmentInput::open(path, None)?;
@@ -375,7 +465,7 @@ pub fn scan_as_alignments(
     // Validate reference sequences match the primary input
     AlignmentInput::validate_headers_match(bam_header, &input.header, path)?;
 
-    let mut accumulator = CoverageAccumulator::new(bam_header, repeats, ref_path);
+    let mut accumulator = CoverageAccumulator::new_with_gc(bam_header, repeats, ref_path, gc_bins);
 
     let mut count = 0u64;
     while let Some(record) = input.read_record()? {

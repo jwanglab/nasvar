@@ -38,6 +38,8 @@ pub struct PipelineRunner<'a> {
     config: Option<&'a PipelineConfig>,
     // Adaptive sampling alignments — replaces main BAM for coverage
     as_alignments: Option<String>,
+    // Pre-computed GC per bin; when Some, bypasses FASTA-based GC scan.
+    gc_bins: Option<crate::var::coverage::GcBinMap>,
     // GFF path used for variant-region BAM slicing (gene bounds for fusion
     // partners + chrom lookup for SNV/ITD genes). Required for slicing.
     gff_path: Option<String>,
@@ -60,6 +62,7 @@ impl<'a> PipelineRunner<'a> {
             fusion_partner_index: None,
             config: None,
             as_alignments: None,
+            gc_bins: None,
             gff_path: None,
             export_slice_bam: true,
         }
@@ -106,6 +109,11 @@ impl<'a> PipelineRunner<'a> {
         self
     }
 
+    pub fn with_gc_bins(mut self, gc_bins: Option<crate::var::coverage::GcBinMap>) -> Self {
+        self.gc_bins = gc_bins;
+        self
+    }
+
     pub fn with_gff_path(mut self, gff_path: Option<String>) -> Self {
         self.gff_path = gff_path;
         self
@@ -149,7 +157,9 @@ impl<'a> PipelineRunner<'a> {
         let use_as_for_coverage = self.as_alignments.is_some();
         let mut cov_acc = if !use_as_for_coverage {
             if let Some(reps) = &self.coverage_repeats {
-                Some(CoverageAccumulator::new(&header, reps, self.ref_path.as_deref()))
+                Some(CoverageAccumulator::new_with_gc(
+                    &header, reps, self.ref_path.as_deref(), self.gc_bins.as_ref(),
+                ))
             } else {
                 None
             }
@@ -223,9 +233,11 @@ impl<'a> PipelineRunner<'a> {
         let as_reads_aligned: Option<u64> = if let Some(ref as_path) = self.as_alignments
             && let Some(reps) = &self.coverage_repeats
         {
-            use crate::var::coverage::scan_as_alignments;
+            use crate::var::coverage::scan_as_alignments_with_gc;
             info!("Scanning adaptive sampling alignments for coverage...");
-            let as_acc = scan_as_alignments(as_path, &header, reps, self.ref_path.as_deref())?;
+            let as_acc = scan_as_alignments_with_gc(
+                as_path, &header, reps, self.ref_path.as_deref(), self.gc_bins.as_ref(),
+            )?;
             as_acc.write_output(&format!("{}.coverage.tsv", self.out_prefix), true)?;
             Some(as_acc.reads_aligned())
         } else {

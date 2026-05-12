@@ -275,6 +275,9 @@ enum Commands {
         /// Adaptive sampling alignment file (SAM/BAM/CRAM) to use INSTEAD of the main BAM for coverage/karyotyping. Does not require sorting or index.
         #[arg(long)]
         as_alignments: Option<String>,
+        /// Pre-computed per-bin GC TSV (columns: chrom, bin_start, bin_end, gc_content). When supplied, skips FASTA-based GC scan — useful with a sparse reference.
+        #[arg(long)]
+        gc_bins: Option<String>,
     },
     /// Call Internal Tandem Duplications (ITDs)
     Itd {
@@ -846,6 +849,7 @@ fn main() {
             min_depth,
             plot_y_percentile,
             as_alignments,
+            gc_bins,
         } => {
             let mut timer = StepTimer::new();
 
@@ -965,6 +969,16 @@ fn main() {
                 .with_partner_index(partner_index.clone())
                 .with_config(&pipeline_config)
                 .with_as_alignments(as_alignments.clone())
+                .with_gc_bins(match gc_bins.as_deref() {
+                    Some(path) => match nasvar::var::coverage::load_gc_bins(path, 1_000_000) {
+                        Ok(m) => Some(m),
+                        Err(e) => {
+                            error!("Error loading gc_bins {}: {}", path, e);
+                            return;
+                        }
+                    },
+                    None => None,
+                })
                 .with_gff_path(Some(gff.clone()));
 
             let (pipeline_output, reads_aligned, focal_depths) = match runner.run(&mut br) {
