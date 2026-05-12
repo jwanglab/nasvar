@@ -17,6 +17,7 @@ bitvec = "1"
 tikv-jemallocator = "0.6"
 schemars = "1"
 jsonschema = "0.28"
+flate2 = "1"
 
 # CRAM processing is *exceptionally* slow because of architectural limitations (of the CRAM format) and implementation limtiations (in noodles)
 # we are working to patch it but for now we use the noodle main branch - beware it will be SLOW

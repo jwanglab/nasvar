@@ -947,6 +947,7 @@ dependencies = [
  "bitvec",
  "clap",
  "env_logger",
+ "flate2",
  "indexmap",
  "jsonschema",
  "log",

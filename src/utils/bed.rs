@@ -1,5 +1,7 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
+
+use flate2::read::MultiGzDecoder;
 
 #[derive(Debug, Clone)]
 pub struct BedRegion {
@@ -10,9 +12,22 @@ pub struct BedRegion {
 }
 
 pub fn read_bed(bed_path: &str) -> Result<Vec<BedRegion>, Box<dyn std::error::Error>> {
-    let file = File::open(bed_path)
+    let mut file = File::open(bed_path)
         .map_err(|e| std::io::Error::other(format!("Error opening BED file {}: {}", bed_path, e)))?;
-    let reader = BufReader::new(file);
+
+    // Sniff the first two bytes for the gzip magic (0x1f 0x8b). This catches
+    // both plain gzip (produced by `gzip`) and BGZF (blocked gzip produced by
+    // `bgzip`), since BGZF is a concatenation of gzip members that
+    // MultiGzDecoder handles transparently.
+    let mut magic = [0u8; 2];
+    let n = file.read(&mut magic)?;
+    file = File::open(bed_path)?; // re-open to reset position
+
+    let reader: Box<dyn BufRead> = if n == 2 && magic == [0x1f, 0x8b] {
+        Box::new(BufReader::new(MultiGzDecoder::new(file)))
+    } else {
+        Box::new(BufReader::new(file))
+    };
     read_bed_from_reader(reader)
 }
 
@@ -67,6 +82,30 @@ mod tests {
         assert_eq!(regions[1].start, 500);
         assert_eq!(regions[1].end, 600);
         assert_eq!(regions[1].name, "chr2:500-600");
+    }
+
+    #[test]
+    fn test_bed_gzipped() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let data = "chr1\t100\t200\tgene1\nchr2\t500\t600\n";
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(data.as_bytes()).unwrap();
+        let gz_bytes = enc.finish().unwrap();
+
+        let path = std::env::temp_dir().join("nasvar_bed_gzip_test.bed.gz");
+        std::fs::write(&path, &gz_bytes).unwrap();
+
+        let regions = read_bed(path.to_str().unwrap()).unwrap();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].segment, "chr1");
+        assert_eq!(regions[0].start, 100);
+        assert_eq!(regions[0].end, 200);
+        assert_eq!(regions[1].segment, "chr2");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
