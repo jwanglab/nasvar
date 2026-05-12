@@ -4,6 +4,7 @@ pub mod config;
 pub mod input;
 pub mod karyotype;
 pub mod output;
+pub mod pack;
 pub mod pipeline;
 pub mod plotting;
 pub mod report;

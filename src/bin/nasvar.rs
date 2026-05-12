@@ -1131,6 +1131,15 @@ fn main() {
                 }
                 timer.end();
             }
+
+            // Bundle every <prefix>.* output into a portable .nasvar.zip.
+            // Runs last so it picks up everything: pipeline outputs, the
+            // slice BAM, karyotype/GC SVGs, CNV/SNV/ITD tables, the merged
+            // result.json, the HTML report, and any focal-depth plots.
+            // Best-effort: a pack failure shouldn't fail the run.
+            if let Err(e) = nasvar::pack::pack_results(out_prefix, Some(bam)) {
+                warn!("[pack] failed: {}", e);
+            }
         }
 
         Commands::Itd {
