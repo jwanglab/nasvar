@@ -12,6 +12,10 @@ use log::info;
 use noodles::bam;
 use noodles::bgzf;
 use noodles::cram;
+use noodles::csi::binning_index::{
+    Indexer as CsiIndexer,
+    index::reference_sequence::{bin::Chunk, index::LinearIndex},
+};
 use noodles::fasta;
 pub use noodles::sam;
 use noodles::core::Region;
@@ -298,6 +302,58 @@ pub fn decode_alignment_record(rec: &dyn sam::alignment::Record, header: &sam::H
     })
 }
 
+/// Feed one alignment into the inline indexer. Also enforces coordinate
+/// sortedness: if the BAM is out of (ref_id, pos) order we bail, since a
+/// BAI built from an unsorted BAM is useless.
+fn update_inline_index(
+    indexer: &mut CsiIndexer<LinearIndex>,
+    chunk: Chunk,
+    record: &AlignmentRecord,
+    last_seen: &mut Option<(i32, i32)>,
+    n_refs_seen: &mut usize,
+) -> Result<()> {
+    use noodles::core::Position;
+
+    // Unmapped / no reference: passed to indexer as None.
+    if record.ref_id < 0 || record.pos < 0 {
+        indexer.add_record(None, chunk).map_err(|e| anyhow::anyhow!("{}", e))?;
+        return Ok(());
+    }
+
+    // Enforce (ref_id, pos) non-decreasing. The csi indexer itself also
+    // rejects ref_id regressions, but surfacing it here gives a clearer
+    // "BAM must be sorted" message.
+    if let Some((prev_ref, prev_pos)) = *last_seen
+        && (record.ref_id < prev_ref
+            || (record.ref_id == prev_ref && record.pos < prev_pos)) {
+        bail!(
+            "BAM is not coordinate-sorted (saw {}:{} after {}:{}); \
+             cannot build an index on the fly. Pre-sort the BAM or \
+             provide a .bai.",
+            record.ref_id, record.pos, prev_ref, prev_pos,
+        );
+    }
+    *last_seen = Some((record.ref_id, record.pos));
+
+    // Coordinates for BAI/CSI are 1-based inclusive Position.
+    let start_1b = (record.pos as usize) + 1;
+    let span = record.alignment_span().max(1);
+    let end_1b = start_1b + span - 1;
+    let start = Position::try_from(start_1b)
+        .map_err(|e| anyhow::anyhow!("invalid start position: {}", e))?;
+    let end = Position::try_from(end_1b)
+        .map_err(|e| anyhow::anyhow!("invalid end position: {}", e))?;
+
+    let is_mapped = (record.flag & 0x4) == 0;
+    let ref_id = record.ref_id as usize;
+    *n_refs_seen = (*n_refs_seen).max(ref_id + 1);
+
+    indexer
+        .add_record(Some((ref_id, start, end, is_mapped)), chunk)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(())
+}
+
 /// Inner reader enum
 enum Inner {
     Bam(bam::io::IndexedReader<bgzf::io::Reader<File>>),
@@ -315,9 +371,84 @@ struct ReaderState {
     cram_record_buf: std::collections::VecDeque<AlignmentRecord>,
     /// File size in bytes (cached on open for progress tracking)
     file_size: u64,
+    /// When Some, we're accumulating a BAI in memory during sequential reads
+    /// of a sorted BAM that lacked an index file. After the first pass,
+    /// `finalize_inline_index` converts this into an IndexedReader so
+    /// subsequent `query()` calls have random access.
+    inline_indexer: Option<CsiIndexer<LinearIndex>>,
+    /// (ref_id, pos) of the most-recent record we indexed, used to detect
+    /// sortedness violations while building the index.
+    inline_last_seen: Option<(i32, i32)>,
+    /// Total aligned record count (across all reference sequences); used to
+    /// size the indexer's reference sequence table at build time.
+    inline_n_refs_seen: usize,
+    /// Cached copy of the finalized inline BAI. When Some, seek_to_start
+    /// uses it to re-open as IndexedReader so the index survives any
+    /// `seek(0)` call (e.g. fusion pass 2's bam.seek(bam.start_pos)).
+    inline_built_index: Option<bam::bai::Index>,
 }
 
 impl ReaderState {
+    /// Enable on-the-fly BAI building during the next sequential scan.
+    /// Only meaningful for a BAM that was opened without an index (i.e.
+    /// currently `Inner::BamNoIndex`).
+    fn enable_inline_index(&mut self) {
+        if matches!(self.inner, Inner::BamNoIndex(_)) && self.inline_indexer.is_none() {
+            // LinearIndex with default (min_shift=14, depth=5) is the BAI
+            // parameter set, so the built index is interchangeable with a
+            // real `.bai`.
+            self.inline_indexer = Some(CsiIndexer::<LinearIndex>::default());
+            self.inline_last_seen = None;
+            self.inline_n_refs_seen = 0;
+        }
+    }
+
+    /// Finalize the in-progress inline BAI (if any). If one was being built,
+    /// reopen the underlying BAM wrapped in an IndexedReader that uses it,
+    /// so subsequent `query_inner` calls have random access. Idempotent:
+    /// no-op if no index was being built.
+    fn finalize_inline_index(&mut self, header_n_refs: usize) -> Result<bool> {
+        let Some(indexer) = self.inline_indexer.take() else {
+            return Ok(false);
+        };
+        if !matches!(self.inner, Inner::BamNoIndex(_)) {
+            // Shouldn't happen — enable_inline_index guards against this.
+            return Ok(false);
+        }
+        let n_refs = header_n_refs.max(self.inline_n_refs_seen).max(1);
+        let index: bam::bai::Index = indexer.build(n_refs);
+        info!(
+            "Built inline BAI for {} ({} reference sequences indexed; pass 1 saw reads on {})",
+            self.file_path, n_refs, self.inline_n_refs_seen
+        );
+
+        // Cache the index so subsequent seek_to_start calls can re-use it
+        // (otherwise they'd reopen the BAM without an index, losing it).
+        self.inline_built_index = Some(index.clone());
+
+        // Also persist the BAI alongside the BAM so external consumers
+        // (e.g. an embedded genome browser in the hosting page) can pick
+        // it up from the VFS without having to re-scan the BAM. Best-effort
+        // — a write failure shouldn't kill the pipeline.
+        let bai_path = format!("{}.bai", self.file_path);
+        match bam::bai::fs::write(&bai_path, &index) {
+            Ok(()) => info!("Wrote inline BAI to {}", bai_path),
+            Err(e) => log::warn!("Failed to write inline BAI to {}: {}", bai_path, e),
+        }
+
+        // Reopen the BAM path with an IndexedReader backed by the in-memory
+        // index. The underlying VFS (native fs, OPFS SyncAccessHandle, or
+        // the SAB-bridge Fd in the web worker) already supports random
+        // access via fd_seek, so the query() path just works.
+        let file = File::open(&self.file_path)
+            .map_err(|e| anyhow::anyhow!("Failed to reopen BAM {}: {}", self.file_path, e))?;
+        let mut reader = bam::io::IndexedReader::new(file, index);
+        reader.read_header()?;
+        self.inner = Inner::Bam(reader);
+        info!("Reader for {} upgraded to indexed mode", self.file_path);
+        Ok(true)
+    }
+
     /// Read the next record from this reader.
     fn read_record_inner(&mut self, sam_header: &sam::Header) -> Result<Option<AlignmentRecord>> {
         // For CRAM, use the record buffer
@@ -341,10 +472,26 @@ impl ReaderState {
                 }
             }
             Inner::BamNoIndex(r) => {
+                let chunk_start = self.inline_indexer.as_ref()
+                    .map(|_| r.get_ref().virtual_position());
                 let mut buf = bam::Record::default();
                 match r.read_record(&mut buf) {
                     Ok(0) => Ok(None),
-                    Ok(_) => Ok(Some(decode_bam_record(&buf, sam_header)?)),
+                    Ok(_) => {
+                        let record = decode_bam_record(&buf, sam_header)?;
+                        // Update the in-memory index with this record's chunk,
+                        // if inline-index-build mode is active.
+                        if let Some(indexer) = self.inline_indexer.as_mut() {
+                            let chunk_end = r.get_ref().virtual_position();
+                            let chunk = Chunk::new(chunk_start.unwrap(), chunk_end);
+                            update_inline_index(
+                                indexer, chunk, &record,
+                                &mut self.inline_last_seen,
+                                &mut self.inline_n_refs_seen,
+                            )?;
+                        }
+                        Ok(Some(record))
+                    }
                     Err(e) => Err(e.into()),
                 }
             }
@@ -469,6 +616,15 @@ impl ReaderState {
                 let mut reader = bam::io::indexed_reader::Builder::default()
                     .build_from_path(&path)
                     .map_err(|e| anyhow::anyhow!("Failed to re-open BAM {}: {}", path, e))?;
+                reader.read_header()?;
+                self.inner = Inner::Bam(reader);
+            } else if let Some(cached) = self.inline_built_index.as_ref() {
+                // An inline BAI was built during a previous pass. Re-open
+                // with it so seek(0) doesn't downgrade us back to BamNoIndex
+                // and break subsequent `query()` calls.
+                let file = File::open(&path)
+                    .map_err(|e| anyhow::anyhow!("Failed to re-open BAM {}: {}", path, e))?;
+                let mut reader = bam::io::IndexedReader::new(file, cached.clone());
                 reader.read_header()?;
                 self.inner = Inner::Bam(reader);
             } else {
@@ -681,6 +837,10 @@ impl AlignmentInput {
             fasta_repo: fasta::Repository::default(),
             cram_record_buf: std::collections::VecDeque::new(),
             file_size,
+            inline_indexer: None,
+            inline_last_seen: None,
+            inline_n_refs_seen: 0,
+            inline_built_index: None,
         };
         Ok((state, sam_header, header))
     }
@@ -706,6 +866,10 @@ impl AlignmentInput {
                 fasta_repo: fasta::Repository::default(),
                 cram_record_buf: std::collections::VecDeque::new(),
                 file_size,
+                inline_indexer: None,
+                inline_last_seen: None,
+                inline_n_refs_seen: 0,
+                inline_built_index: None,
             };
             Ok((state, sam_header, header))
         } else {
@@ -720,6 +884,10 @@ impl AlignmentInput {
                 fasta_repo: fasta::Repository::default(),
                 cram_record_buf: std::collections::VecDeque::new(),
                 file_size,
+                inline_indexer: None,
+                inline_last_seen: None,
+                inline_n_refs_seen: 0,
+                inline_built_index: None,
             };
             Ok((state, sam_header, header))
         }
@@ -760,6 +928,10 @@ impl AlignmentInput {
                 fasta_repo: repo,
                 cram_record_buf: std::collections::VecDeque::new(),
                 file_size,
+                inline_indexer: None,
+                inline_last_seen: None,
+                inline_n_refs_seen: 0,
+                inline_built_index: None,
             };
             Ok((state, sam_header, header))
         } else {
@@ -776,6 +948,10 @@ impl AlignmentInput {
                 fasta_repo: repo,
                 cram_record_buf: std::collections::VecDeque::new(),
                 file_size,
+                inline_indexer: None,
+                inline_last_seen: None,
+                inline_n_refs_seen: 0,
+                inline_built_index: None,
             };
             Ok((state, sam_header, header))
         }
@@ -890,6 +1066,29 @@ impl AlignmentInput {
     /// Returns true if all readers have an index file.
     pub fn has_index(&self) -> bool {
         self.readers.iter().all(|r| r.has_index())
+    }
+
+    /// Turn on inline-BAI-building for every currently-non-indexed BAM
+    /// reader. No effect on readers that already have an on-disk index or
+    /// are SAM/CRAM.
+    pub fn enable_inline_index(&mut self) {
+        for r in &mut self.readers {
+            r.enable_inline_index();
+        }
+    }
+
+    /// Finalize any inline indexes that were built during the most recent
+    /// sequential scan. After this returns, `query()` works on readers that
+    /// didn't ship with a .bai. Idempotent.
+    pub fn finalize_inline_index(&mut self) -> Result<()> {
+        // Use the full reference count from the BAM header so the built
+        // index covers every contig the pipeline may query — even ones
+        // that happened to have no reads in pass 1.
+        let n_refs = self.header.refs.len();
+        for r in &mut self.readers {
+            r.finalize_inline_index(n_refs)?;
+        }
+        Ok(())
     }
 
     /// Check that all readers have an index, returning a clear error if not.

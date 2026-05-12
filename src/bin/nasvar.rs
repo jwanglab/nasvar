@@ -870,10 +870,9 @@ fn main() {
                     return;
                 }
             };
-            if let Err(e) = br.require_index(bam) {
-                error!("{}", e);
-                return;
-            }
+            // require_index is intentionally skipped for `pipeline`: if no
+            // .bai is present, PipelineRunner::run builds one on-the-fly
+            // from pass 1's sequential scan (BAM must be sorted).
             let r_vec = match read_bed(repeats) {
                 Ok(v) => v,
                 Err(e) => {
@@ -968,7 +967,7 @@ fn main() {
                 .with_as_alignments(as_alignments.clone())
                 .with_gff_path(Some(gff.clone()));
 
-            let (pipeline_output, reads_aligned, focal_depths) = match runner.run() {
+            let (pipeline_output, reads_aligned, focal_depths) = match runner.run(&mut br) {
                 Ok(r) => (r.output, r.reads_aligned, r.focal_depths),
                 Err(e) => {
                     error!("Error in PipelineRunner: {}", e);

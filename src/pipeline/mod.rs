@@ -116,7 +116,7 @@ impl<'a> PipelineRunner<'a> {
         self
     }
 
-    pub fn run(self) -> Result<PipelineResult, Box<dyn std::error::Error>> {
+    pub fn run(self, mut bam: &mut AlignmentInput) -> Result<PipelineResult, Box<dyn std::error::Error>> {
         info!("Starting Pipeline...");
 
         // Snapshot fusion_targets here — fusion calling later in this
@@ -124,7 +124,17 @@ impl<'a> PipelineRunner<'a> {
         // slice at the end needs them for the partner-gene bounds lookup.
         let fusion_targets_for_slice: Option<Vec<BedRegion>> = self.fusion_targets.clone();
 
-        let mut bam = AlignmentInput::open(&self.bam_path, self.ref_path.as_deref())?;
+        // If no on-disk BAI was supplied, build one inline from pass 1's
+        // sequential scan so the SNV / ITD / fusion-consensus / CNV stages
+        // that need `query()` can run afterward.
+        if !bam.has_index() {
+            info!(
+                "No index for {}; will build one on the fly during pass 1 (BAM must be coordinate-sorted).",
+                self.bam_path
+            );
+            bam.enable_inline_index();
+        }
+
         let header = bam.header.clone();
 
         // Initialize output collector with metadata from BAM header
@@ -204,6 +214,10 @@ impl<'a> PipelineRunner<'a> {
             }
         }
         info!("Processed {} reads. Done.", i);
+
+        // Pass-1 stream is done. If we were building an inline BAI, finalize
+        // it now so the subsequent random-access stages can query.
+        bam.finalize_inline_index()?;
 
         // Adaptive sampling coverage scan (replaces main BAM for coverage and reads_aligned)
         let as_reads_aligned: Option<u64> = if let Some(ref as_path) = self.as_alignments
