@@ -326,27 +326,29 @@ pub fn read_depth(
     repeats: &[BedRegion],
     out_prefix: &str,
     as_alignments: Option<&str>,
+    ref_path: Option<&str>,
 ) -> Result<u64, Box<dyn std::error::Error>>
 {
     info!("Calculating coverage...");
 
     let out_file = format!("{}.coverage.tsv", out_prefix);
+    let include_gc = ref_path.is_some();
 
     if let Some(as_path) = as_alignments {
         // Use adaptive sampling alignments exclusively for coverage
-        let accumulator = scan_as_alignments(as_path, &bam.header, repeats, None)?;
-        accumulator.write_output(&out_file, false)?;
+        let accumulator = scan_as_alignments(as_path, &bam.header, repeats, ref_path)?;
+        accumulator.write_output(&out_file, include_gc)?;
         let reads_aligned = accumulator.reads_aligned();
         info!("Total aligned reads (primary, from AS): {}", reads_aligned);
         Ok(reads_aligned)
     } else {
         // Standard: scan main BAM for coverage
-        let mut accumulator = CoverageAccumulator::new(&bam.header, repeats, None);
+        let mut accumulator = CoverageAccumulator::new(&bam.header, repeats, ref_path);
         bam.seek(bam.start_pos)?;
         while let Some(record) = bam.read_record()? {
             accumulator.process(&record);
         }
-        accumulator.write_output(&out_file, false)?;
+        accumulator.write_output(&out_file, include_gc)?;
         let reads_aligned = accumulator.reads_aligned();
         info!("Total aligned reads (primary): {}", reads_aligned);
         Ok(reads_aligned)

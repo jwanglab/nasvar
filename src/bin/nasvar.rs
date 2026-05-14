@@ -809,7 +809,7 @@ fn main() {
                     return;
                 }
             };
-            match read_depth(&mut br, &r_vec, out_prefix, as_alignments.as_deref()) {
+            match read_depth(&mut br, &r_vec, out_prefix, as_alignments.as_deref(), ref_fasta.as_deref()) {
                 Ok(reads_aligned) => info!("Aligned reads counted: {}", reads_aligned),
                 Err(e) => error!("Error calculating coverage: {}", e),
             }
