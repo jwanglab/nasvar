@@ -344,6 +344,11 @@ pub struct ItdOutput {
 /// A single ITD event
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ItdEvent {
+    /// Chromosome name (from the ITD region config). Carried on the event
+    /// so downstream consumers don't need the pipeline config to render a
+    /// "view alignments" link.
+    pub chrom: String,
+
     /// Insertion position on reference
     pub position: i64,
 

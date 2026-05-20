@@ -8,8 +8,7 @@
 //!     nest packages.
 //!
 //! `.bam` entries are stored uncompressed because they're already bgzf; every
-//! other entry is deflated. Intended for portable sharing of a run between
-//! machines (the browser frontend imports the same format directly).
+//! other entry is gzipped.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,8 +16,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use log::info;
 use serde::Serialize;
+use time::OffsetDateTime;
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
+
+/// Convert a `SystemTime` into a `zip::DateTime`, falling back to "now" and
+/// then to the zip epoch (1980-01-01) if the conversions fail. Without this,
+/// every entry's mtime defaults to 1980-01-01
+fn zip_dt_from(st: SystemTime) -> zip::DateTime {
+    let odt = OffsetDateTime::from(st);
+    zip::DateTime::try_from(odt)
+        .or_else(|_| zip::DateTime::try_from(OffsetDateTime::now_utc()))
+        .unwrap_or_default()
+}
 
 const FORMAT: &str = "nasvar-result-package";
 const VERSION: u32 = 1;
@@ -31,7 +41,12 @@ struct Manifest {
     /// Unix milliseconds the package was written. Browser side renders this
     /// with `new Date(savedAtMs).toISOString()` if it wants an ISO string.
     saved_at_ms: u64,
-    /// Basename of the input BAM (no directory), or null if unknown.
+    /// Preferred human-readable identifier for the run -- the @RG LB: tag
+    /// from the BAM header, when available. Falls back to bamName/outPrefix
+    /// on the consumer side.
+    sample_name: Option<String>,
+    /// Basename of the input BAM (no directory), or null if unknown. For
+    /// multi-BAM input this is the file-of-filenames (.txt/.list) name.
     bam_name: Option<String>,
     /// Basename of the run's `out_prefix` (no directory).
     out_prefix: String,
@@ -43,7 +58,14 @@ struct Manifest {
 
 /// Write `<out_prefix>.nasvar.zip` containing the manifest and every sibling
 /// file matching `<basename>.*`. Returns the zip path on success.
-pub fn pack_results(out_prefix: &str, bam_path: Option<&str>) -> Result<String> {
+///
+/// `sample_name` is the BAM's @RG LB: tag when available, used for human-
+/// readable run labels in downstream viewers.
+pub fn pack_results(
+    out_prefix: &str,
+    bam_path: Option<&str>,
+    sample_name: Option<&str>,
+) -> Result<String> {
     let zip_path = format!("{}.nasvar.zip", out_prefix);
 
     let prefix_path = Path::new(out_prefix);
@@ -91,6 +113,7 @@ pub fn pack_results(out_prefix: &str, bam_path: Option<&str>) -> Result<String> 
         format: FORMAT,
         version: VERSION,
         saved_at_ms,
+        sample_name: sample_name.map(|s| s.to_string()),
         bam_name: bam_path.and_then(|p| {
             Path::new(p)
                 .file_name()
@@ -105,9 +128,12 @@ pub fn pack_results(out_prefix: &str, bam_path: Option<&str>) -> Result<String> 
         .map_err(|e| anyhow!("create {}: {}", zip_path, e))?;
     let mut zw = ZipWriter::new(zip_file);
 
+    let now_dt = zip_dt_from(SystemTime::now());
     zw.start_file(
         "manifest.json",
-        SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+        SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .last_modified_time(now_dt),
     )?;
     serde_json::to_writer_pretty(&mut zw, &manifest)
         .map_err(|e| anyhow!("write manifest: {}", e))?;
@@ -120,9 +146,17 @@ pub fn pack_results(out_prefix: &str, bam_path: Option<&str>) -> Result<String> 
         } else {
             CompressionMethod::Deflated
         };
+        // Use the on-disk mtime so a file extracted from the package keeps
+        // its "generated at run time" timestamp rather than 1980-01-01.
+        let mtime = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map(zip_dt_from)
+            .unwrap_or(now_dt);
         zw.start_file(
             name,
-            SimpleFileOptions::default().compression_method(method),
+            SimpleFileOptions::default()
+                .compression_method(method)
+                .last_modified_time(mtime),
         )?;
         let mut f = std::fs::File::open(path)
             .map_err(|e| anyhow!("open {}: {}", path.display(), e))?;
@@ -161,7 +195,7 @@ mod tests {
         // Sibling that doesn't belong (different basename) must be ignored.
         std::fs::write(tmp.join("other.tsv"), b"nope").unwrap();
 
-        let zip_path = pack_results(prefix_str, Some("/in/sample1.bam")).unwrap();
+        let zip_path = pack_results(prefix_str, Some("/in/sample1.bam"), Some("LB-XYZ")).unwrap();
         assert_eq!(zip_path, format!("{}.nasvar.zip", prefix_str));
 
         let f = std::fs::File::open(&zip_path).unwrap();
@@ -183,8 +217,16 @@ mod tests {
         assert_eq!(v["format"], "nasvar-result-package");
         assert_eq!(v["version"], 1);
         assert_eq!(v["bamName"], "sample1.bam");
+        assert_eq!(v["sampleName"], "LB-XYZ");
         assert_eq!(v["outPrefix"], "sample1");
         assert_eq!(v["fileCount"], 3);
+
+        // Entries must carry a realistic mtime, not the zip-epoch default (1980-01-01)
+        let entry_year = zip.by_name("sample1.coverage.tsv").unwrap()
+            .last_modified().map(|d| d.year()).unwrap_or(1980);
+        let now_year = time::OffsetDateTime::now_utc().year() as u16;
+        assert_eq!(entry_year, now_year,
+            "entry mtime year {} should match current year {} (not 1980)", entry_year, now_year);
 
         std::fs::remove_dir_all(&tmp).ok();
     }

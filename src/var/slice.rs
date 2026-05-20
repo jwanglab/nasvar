@@ -263,11 +263,35 @@ fn merge_regions(mut regions: Vec<(String, u32, u32)>) -> Vec<(String, u32, u32)
     out
 }
 
+/// Resolve a `--bam` argument into its underlying BAM paths: a `.txt`/`.list`
+/// file-of-filenames expands to its line entries; anything else is treated
+/// as a single BAM path.
+fn resolve_bam_paths(src: &str) -> Result<Vec<String>> {
+    if src.ends_with(".txt") || src.ends_with(".list") {
+        let content = std::fs::read_to_string(src)
+            .map_err(|e| anyhow!("read BAM list {}: {}", src, e))?;
+        let paths: Vec<String> = content
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|s| s.to_string())
+            .collect();
+        if paths.is_empty() {
+            return Err(anyhow!("BAM list {} contains no paths", src));
+        }
+        Ok(paths)
+    } else {
+        Ok(vec![src.to_string()])
+    }
+}
+
 /// Write a slice BAM containing only reads overlapping `regions`, plus a
-/// BAI alongside it. Reads are deduplicated across overlapping queries by
-/// (ref_id, pos, flag, qname).
+/// BAI alongside it. Reads are deduplicated across overlapping queries and
+/// across multiple source BAMs by (ref_id, pos, flag, qname). For multi-BAM
+/// input, every source must already have a `<path>.bai` (the pipeline's
+/// inline-index builder writes one per reader at the end of pass 1).
 pub fn write_slice_bam(
-    src_bam: &str,
+    src_bams: &[String],
     regions: &[(String, u32, u32)],
     out_bam: &str,
 ) -> Result<usize> {
@@ -275,25 +299,40 @@ pub fn write_slice_bam(
         info!("[slice] no regions of interest — skipping slice BAM");
         return Ok(0);
     }
-
-    // Source: indexed reader. The BAI is at <src_bam>.bai (either user-
-    // supplied or written by finalize_inline_index during the pipeline).
-    let bai_path = format!("{}.bai", src_bam);
-    if !Path::new(&bai_path).exists() {
-        return Err(anyhow!("slice requires {}; pipeline should have built one inline", bai_path));
+    if src_bams.is_empty() {
+        return Err(anyhow!("write_slice_bam: no source BAMs supplied"));
     }
-    let index = bam::bai::fs::read(&bai_path)
-        .map_err(|e| anyhow!("read bai {}: {}", bai_path, e))?;
-    let mut reader = bam::io::indexed_reader::Builder::default()
-        .set_index(index)
-        .build_from_path(src_bam)
-        .map_err(|e| anyhow!("open indexed bam {}: {}", src_bam, e))?;
-    let header = reader.read_header()
-        .map_err(|e| anyhow!("read header: {}", e))?;
 
-    // Sink: BAM writer over a bgzf writer. We keep a handle on the bgzf
-    // writer via .get_ref()/.get_mut() to read virtual_position before/after
-    // each record and tick the indexer with the right chunk.
+    // Sources: one indexed reader per BAM. The first BAM's header is
+    // canonical for the output — AlignmentInput::open_multi already verified
+    // that every member shares the same reference sequences.
+    let mut readers: Vec<bam::io::IndexedReader<bgzf::io::Reader<File>>> =
+        Vec::with_capacity(src_bams.len());
+    let mut canonical_header: Option<noodles::sam::Header> = None;
+    for path in src_bams {
+        let bai_path = format!("{}.bai", path);
+        if !Path::new(&bai_path).exists() {
+            return Err(anyhow!(
+                "slice requires {}; pipeline should have built one inline",
+                bai_path
+            ));
+        }
+        let index = bam::bai::fs::read(&bai_path)
+            .map_err(|e| anyhow!("read bai {}: {}", bai_path, e))?;
+        let mut reader = bam::io::indexed_reader::Builder::default()
+            .set_index(index)
+            .build_from_path(path)
+            .map_err(|e| anyhow!("open indexed bam {}: {}", path, e))?;
+        let header = reader.read_header()
+            .map_err(|e| anyhow!("read header for {}: {}", path, e))?;
+        if canonical_header.is_none() {
+            canonical_header = Some(header);
+        }
+        readers.push(reader);
+    }
+    let header = canonical_header.unwrap();
+
+    // Sink: BAM writer over a bgzf writer.
     let out_file = File::create(out_bam)
         .map_err(|e| anyhow!("create {}: {}", out_bam, e))?;
     let bgzf_writer = bgzf::io::Writer::new(out_file);
@@ -312,45 +351,56 @@ pub fn write_slice_bam(
             .map_err(|e| anyhow!("region end: {}", e))?;
         let region = Region::new(chrom.as_bytes().to_vec(), s_pos..=e_pos);
 
-        let query = match reader.query(&header, &region) {
-            Ok(q) => q,
-            Err(e) => {
-                warn!("[slice] query failed for {}:{}-{}: {} — skipping", chrom, start, end, e);
+        // Pull records from every reader into one bucket, then sort by
+        // (ref_id, pos) so the output stays coordinate-sorted (required for
+        // the post-pass BAI build). The single-BAM case is essentially free:
+        // records come back already in pos order and Rust's sort is adaptive.
+        let mut buf: Vec<(i32, i32, u16, Vec<u8>, bam::Record)> = Vec::new();
+        for reader in &mut readers {
+            let query = match reader.query(&header, &region) {
+                Ok(q) => q,
+                Err(e) => {
+                    warn!(
+                        "[slice] query failed for {}:{}-{}: {} — skipping",
+                        chrom, start, end, e
+                    );
+                    continue;
+                }
+            };
+            for result in query.records() {
+                let record = result.map_err(|e| anyhow!("read record: {}", e))?;
+
+                // Mirrors decode_bam_record() in src/input.rs for the few
+                // fields we need for dedup + sorting. CIGAR/seq/quality pass
+                // through verbatim via write_record(&header, &record).
+                let ref_id: i32 = match record.reference_sequence_id() {
+                    Some(Ok(id)) => id as i32,
+                    Some(Err(e)) => return Err(anyhow!("ref id: {}", e)),
+                    None => -1,
+                };
+                let pos: i32 = match record.alignment_start() {
+                    Some(Ok(p)) => (p.get() as i32) - 1, // 1-based → 0-based
+                    Some(Err(e)) => return Err(anyhow!("pos: {}", e)),
+                    None => -1,
+                };
+                let flag: u16 = record.flags().bits();
+                let qname: Vec<u8> = record
+                    .name()
+                    .map(|n| <_ as AsRef<[u8]>>::as_ref(n).to_vec())
+                    .unwrap_or_default();
+                buf.push((ref_id, pos, flag, qname, record));
+            }
+        }
+        buf.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+        for (ref_id, pos, flag, qname, record) in buf {
+            let key = (ref_id, pos, flag, qname);
+            if !seen.insert(key) {
                 continue;
             }
-        };
-
-        for result in query.records() {
-            let record = result.map_err(|e| anyhow!("read record: {}", e))?;
-
-            // Mirrors decode_bam_record() in src/input.rs for the few fields
-            // we need for dedup + indexing. We intentionally don't decode
-            // CIGAR/seq/quality — those bytes pass through to the writer
-            // verbatim via write_record(&header, &record).
-            let ref_id: i32 = match record.reference_sequence_id() {
-                Some(Ok(id)) => id as i32,
-                Some(Err(e)) => return Err(anyhow!("ref id: {}", e)),
-                None => -1,
-            };
-            let pos: i32 = match record.alignment_start() {
-                Some(Ok(p)) => (p.get() as i32) - 1, // 1-based → 0-based
-                Some(Err(e)) => return Err(anyhow!("pos: {}", e)),
-                None => -1,
-            };
-            let flag: u16 = record.flags().bits();
-            let qname: Vec<u8> = record.name()
-                .map(|n| <_ as AsRef<[u8]>>::as_ref(n).to_vec())
-                .unwrap_or_default();
-
-            let key = (ref_id, pos, flag, qname);
-            if !seen.insert(key) { continue; }
-
             writer.write_record(&header, &record)
                 .map_err(|e| anyhow!("write record: {}", e))?;
             written += 1;
-            let _ = pos; // silence "unused" while the indexer lives in pass 2
-            let _ = flag;
-            let _ = ref_id;
         }
     }
 
@@ -358,24 +408,26 @@ pub fn write_slice_bam(
     // a truncated file.
     drop(writer);
 
-    // Second pass: build the BAI by reading back the freshly-written BAM
-    // and feeding records into the CSI indexer. Doing this in a separate
-    // pass over the file removes any reliance on bgzf::Writer
-    // virtual-position semantics during buffered writes — we use the
-    // reader's virtual_position() instead, which is the same path
-    // input.rs::finalize_inline_index uses for the input-BAM index.
+    // Second pass: build the BAI by reading back the freshly-written BAM and
+    // feeding records into the CSI indexer.
     build_bai(out_bam, header.reference_sequences().len())?;
 
-    info!("[slice] wrote {} reads across {} merged regions → {} (+ {}.bai)",
-          written, regions.len(), out_bam, out_bam);
+    info!(
+        "[slice] wrote {} reads across {} merged regions from {} BAM(s) → {} (+ {}.bai)",
+        written, regions.len(), src_bams.len(), out_bam, out_bam
+    );
     Ok(written)
 }
 
 /// Convenience: compute regions from `unified`, then write the slice BAM
-/// (and BAI) to `<out_prefix>.slice.bam`.
+/// (and BAI) to `<out_prefix>.slice.bam`. When `ref_path` is supplied, also
+/// emit `<out_prefix>.slice.fa` + `.fai` containing just the bases that
+/// cover the slice regions, so a downstream viewer can render mismatch
+/// ticks without needing the full reference.
 pub fn dump_variant_slice(
     unified: &UnifiedOutput,
     src_bam: &str,
+    ref_path: Option<&str>,
     gff_path: &str,
     fusion_targets: Option<&[BedRegion]>,
     out_prefix: &str,
@@ -391,10 +443,130 @@ pub fn dump_variant_slice(
     let total_bp: u64 = regions.iter().map(|r| (r.2 - r.1) as u64).sum();
     info!("[slice] {} merged regions, total span {} bp", regions.len(), total_bp);
 
+    let src_bams = resolve_bam_paths(src_bam)?;
     let bam_out = format!("{}.slice.bam", out_prefix);
-    write_slice_bam(src_bam, &regions, &bam_out)?;
+    write_slice_bam(&src_bams, &regions, &bam_out)?;
     let bai_out = format!("{}.bai", bam_out);
+
+    // Best-effort: a slice FASTA is useful but not load-bearing for the BAM.
+    if let Some(rp) = ref_path {
+        let fa_out = format!("{}.slice.fa.gz", out_prefix);
+        if let Err(e) = write_slice_fasta(&regions, rp, &fa_out) {
+            warn!("[slice] fasta dump failed: {}", e);
+        }
+    }
+
     Ok(Some((bam_out, bai_out)))
+}
+
+/// Write a sparse, gzipped FASTA containing just the slice regions, one
+/// record per merged region named `<chrom>:<start>-<end>`. Coordinates
+/// match the slice BAM (1-based inclusive). Also writes `<out_fa>.fai`
+/// with offsets into the *uncompressed* stream (samtools convention) so
+/// a viewer can decode-once-then-slice without needing a .gzi index.
+///
+/// `out_fa` must end in `.fa.gz` -- the entire output is a single gzip
+/// member (not bgzipped). For typical slice sizes (sub-MB) whole-file
+/// decompression is fast.
+pub fn write_slice_fasta(
+    regions: &[(String, u32, u32)],
+    ref_path: &str,
+    out_fa: &str,
+) -> Result<usize> {
+    use noodles::fasta;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+    use crate::bam::ContigMapper;
+
+    if regions.is_empty() {
+        return Ok(0);
+    }
+
+    // The reference may use accession-style names (NC_*) while the slice
+    // regions carry BAM-style names (chr1, chr2). Build a mapper from the
+    // reference's .fai so we can translate BAM → FASTA when querying.
+    let fai_path = format!("{}.fai", ref_path);
+    let fasta_mapper = ContigMapper::from_fai(&fai_path).ok();
+
+    let mut reader = fasta::io::indexed_reader::Builder::default()
+        .build_from_path(ref_path)
+        .map_err(|e| anyhow!("open ref {}: {}", ref_path, e))?;
+
+    let out_file = File::create(out_fa)
+        .map_err(|e| anyhow!("create {}: {}", out_fa, e))?;
+    let mut out = GzEncoder::new(out_file, Compression::default());
+    let mut fai = File::create(format!("{}.fai", out_fa))
+        .map_err(|e| anyhow!("create {}.fai: {}", out_fa, e))?;
+
+    let line_bases: usize = 60;
+    let line_width: usize = line_bases + 1; // 60 bases + LF
+    // Tracks offset into the *uncompressed* stream -- that's what .fai
+    // entries reference, regardless of the on-disk gzip framing.
+    let mut offset: u64 = 0;
+    let mut written = 0usize;
+
+    for (chrom, start, end) in regions {
+        let fasta_chrom = fasta_mapper
+            .as_ref()
+            .map(|m| m.to_bam_name(chrom))
+            .unwrap_or_else(|| chrom.clone());
+
+        let region_str = format!("{}:{}-{}", fasta_chrom, start, end);
+        let region: Region = match region_str.parse() {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("[slice] region parse {}: {}", region_str, e);
+                continue;
+            }
+        };
+        let rec = match reader.query(&region) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("[slice] ref fetch {}: {}", region_str, e);
+                continue;
+            }
+        };
+        let bases = rec.sequence().as_ref();
+        let total_bases = bases.len();
+
+        // Header — use the BAM-style chrom so the viewer can look up by it.
+        let name = format!("{}:{}-{}", chrom, start, end);
+        let header_line = format!(">{}\n", name);
+        out.write_all(header_line.as_bytes())?;
+        offset += header_line.len() as u64;
+        let bases_offset = offset;
+
+        // Bases wrapped at line_bases per line.
+        let mut i = 0;
+        while i < total_bases {
+            let end_i = (i + line_bases).min(total_bases);
+            out.write_all(&bases[i..end_i])?;
+            out.write_all(b"\n")?;
+            i = end_i;
+        }
+        let full_lines = total_bases / line_bases;
+        let last_line_bases = total_bases % line_bases;
+        let bytes_written = full_lines * line_width
+            + if last_line_bases > 0 { last_line_bases + 1 } else { 0 };
+        offset += bytes_written as u64;
+
+        // .fai entry — samtools format.
+        let fai_line = format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            name, total_bases, bases_offset, line_bases, line_width
+        );
+        fai.write_all(fai_line.as_bytes())?;
+
+        written += 1;
+    }
+
+    out.finish().map_err(|e| anyhow!("gzip finish {}: {}", out_fa, e))?;
+
+    info!(
+        "[slice] wrote {} ref regions → {} (+ {}.fai)",
+        written, out_fa, out_fa
+    );
+    Ok(written)
 }
 
 /// Read the just-written slice BAM in coordinate order and produce a BAI

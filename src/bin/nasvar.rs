@@ -979,8 +979,7 @@ fn main() {
                         }
                     },
                     None => None,
-                })
-                .with_gff_path(Some(gff.clone()));
+                });
 
             let (pipeline_output, reads_aligned, focal_depths) = match runner.run(&mut br) {
                 Ok(r) => (r.output, r.reads_aligned, r.focal_depths),
@@ -1132,12 +1131,25 @@ fn main() {
                 timer.end();
             }
 
+            // copy the resolved pipeline config alongside the outputs
+            let cfg_out = format!("{}.pipeline_config.json", out_prefix);
+            if let Err(e) = std::fs::copy(config, &cfg_out) {
+                warn!("[pack] failed to copy pipeline config to {}: {}", cfg_out, e);
+            }
+
+            // Variant-region slice BAM: dump reads around every called SNV /
+            // ITD / fusion into <prefix>.slice.bam (+ .bai)
+            let unified = collector.build();
+            if let Err(e) = nasvar::var::slice::dump_variant_slice(
+                &unified, bam, Some(fasta), gff, Some(&t_vec), out_prefix,
+            ) {
+                warn!("[slice] dump failed: {}", e);
+            }
+
             // Bundle every <prefix>.* output into a portable .nasvar.zip.
-            // Runs last so it picks up everything: pipeline outputs, the
-            // slice BAM, karyotype/GC SVGs, CNV/SNV/ITD tables, the merged
-            // result.json, the HTML report, and any focal-depth plots.
-            // Best-effort: a pack failure shouldn't fail the run.
-            if let Err(e) = nasvar::pack::pack_results(out_prefix, Some(bam)) {
+            let sample_name = unified.metadata.as_ref()
+                .and_then(|m| m.library_id.as_deref());
+            if let Err(e) = nasvar::pack::pack_results(out_prefix, Some(bam), sample_name) {
                 warn!("[pack] failed: {}", e);
             }
         }

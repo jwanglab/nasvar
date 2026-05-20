@@ -256,6 +256,7 @@ pub fn call_itds(
             for l in sorted_ins {
                 if *l >= min_length && indels[t][l] >= min_supporting_reads {
                     events.push(ItdEvent {
+                        chrom: chr.clone(),
                         position: **t as i64,
                         length: *l as i64,
                         merged: indels[t][l] as i64,
