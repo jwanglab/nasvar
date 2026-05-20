@@ -126,7 +126,8 @@ Infer karyotype from pre-computed coverage.
 
 ```
 nasvar karyotype --coverage <TSV> --out-prefix <PREFIX> --config <JSON> --reference <JSON> \
-  [--maf <FILE>] [-f]
+  [--maf <FILE>] [--sites <FILE>] [--enriched <BED>] [--gc-correction <METHOD>] \
+  [--min-depth <INT>] [--plot-y-percentile <FLOAT>] [-f]
 ```
 
 ### `nasvar coverage`
