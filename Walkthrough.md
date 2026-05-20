@@ -111,7 +111,7 @@ wget https://s3-us-west-2.amazonaws.com/human-pangenomics/T2T/CHM13/assemblies/v
 bcftools view -G -H -O v -AA -a --known -U -v snps -c 10 \
   1KGP.CHM13v2.0.whole_genome.recalibrated.snp_indel.pass.phased.native_maps.3202.bcf.gz \
   | awk '(length($4)==1 && length($5)==1){ print $1"\t"$2"\t"$4"\t"$5 }' \
-  > maf_sites.tsv
+  > maf_sites_all.tsv
 ```
 
 **Intersect with your enrichment BED to restrict to on-target sites (recommended):**
@@ -121,17 +121,16 @@ The sites file uses `chr*` chromosome names while the enrichment BED uses NCBI a
 ```bash
 # Convert enrichment BED from NC_* accessions to chr* names, then intersect:
 bedtools intersect \
-  -a <(awk '{print $1 "\t" ($2-1) "\t" $2 "\t" $3 "\t" $4}' maf_sites.tsv) \
+  -a <(awk '{print $1 "\t" ($2-1) "\t" $2 "\t" $3 "\t" $4}' maf_sites_all.tsv) \
   -b <(awk 'BEGIN {
         for (i=1; i<=22; i++) acc[sprintf("NC_%06d.1", 60924+i)] = "chr" i
         acc["NC_060947.1"] = "chrX"
         acc["NC_060948.1"] = "chrY"
       } $1 in acc { print acc[$1] "\t" $2 "\t" $3 }' enriched.bed) \
   | awk '{print $1 "\t" $3 "\t" $4 "\t" $5}' \
-  > maf_sites.enriched.tsv
+  > maf_sites.tsv
 ```
 
-Use `maf_sites.enriched.tsv` in place of `maf_sites.tsv` for all subsequent steps. Restricting to on-target sites substantially reduces file size and speeds up MAF pileup.
 
 ## 4. Configuration files
 
