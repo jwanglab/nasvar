@@ -433,11 +433,26 @@ pub fn parse_maf(maf_path: &str, ref_config: &ReferenceConfig, min_depth: u32) -
 /// Parse MAF file returning BAF (alt / (ref+alt)) values grouped by segment for plotting.
 /// Sites with depth >= min_depth get `Some(baf)`. Sub-threshold sites get `None` (spacer —
 /// they occupy x-axis space in the plot but no point is rendered).
-pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_depth: u32) -> Result<HashMap<String, Vec<Option<f64>>>, Box<dyn std::error::Error>> {
+pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_depth: u32, enriched: Option<&[BedRegion]>) -> Result<HashMap<String, Vec<Option<f64>>>, Box<dyn std::error::Error>> {
     let file = File::open(maf_path)?;
     let reader = BufReader::new(file);
     let mut bafs: HashMap<String, Vec<Option<f64>>> = HashMap::new();
     let min_depth_f = min_depth as f64;
+    let mapper = ContigMapper::new();
+
+    // Build per-chromosome sorted interval lookup from enriched regions
+    let enriched_by_chr: Option<Vec<Vec<(u32, u32)>>> = enriched.map(|regions| {
+        let mut by_chr: Vec<Vec<(u32, u32)>> = vec![Vec::new(); NUM_CHROMOSOMES];
+        for r in regions {
+            if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < NUM_CHROMOSOMES {
+                by_chr[idx].push((r.start, r.end));
+            }
+        }
+        for intervals in &mut by_chr {
+            intervals.sort_unstable();
+        }
+        by_chr
+    });
 
     for line in reader.lines() {
         let l = line?;
@@ -449,10 +464,25 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_dept
             continue;
         }
 
-        let chrom = parts[0].to_string();
+        let chrom = parts[0];
         let pos: u32 = parts[1].parse().unwrap_or(0);
         let ref_ct: f64 = parts[2].parse().unwrap_or(0.0);
         let alt_ct: f64 = parts[3].parse().unwrap_or(0.0);
+
+        // Skip sites outside enriched regions when a filter is provided
+        if let Some(ref by_chr) = enriched_by_chr {
+            let in_region = mapper.get_chr_index(chrom)
+                .filter(|&idx| idx < NUM_CHROMOSOMES)
+                .map(|idx| {
+                    let intervals = &by_chr[idx];
+                    let i = intervals.partition_point(|&(start, _)| start <= pos);
+                    i > 0 && pos < intervals[i - 1].1
+                })
+                .unwrap_or(false);
+            if !in_region {
+                continue;
+            }
+        }
 
         let total = ref_ct + alt_ct;
         let value = if total >= min_depth_f {
@@ -461,7 +491,7 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_dept
             None // spacer
         };
 
-        if let Some(segment) = get_segment_from_pos(&chrom, pos, ref_config) {
+        if let Some(segment) = get_segment_from_pos(chrom, pos, ref_config) {
             bafs.entry(segment).or_default().push(value);
         }
     }
@@ -906,14 +936,19 @@ pub fn call_karyotype(
             // Count segments with >4% MAF density; all callable site
             let maf_sufficient = if let Some(sb) = seg_bases {
                 let mut sufficient_segs = 0;
+                let mut seg_ratios: Vec<(String, f64)> = Vec::new();
                 for (seg, &count) in &maf_counts {
                     if let Some(&bases) = sb.get(seg) && bases > 0 {
                         let ratio = count as f64 / bases as f64;
+                        seg_ratios.push((seg.clone(), ratio));
                         if ratio > 0.04 {
                             sufficient_segs += 1;
                         }
                     }
                 }
+                seg_ratios.sort_by(|a, b| a.0.cmp(&b.0));
+                debug!("MAF sufficiency ratios (maf_count/seg_bases): [{}]",
+                    seg_ratios.iter().map(|(s, r)| format!("({}, {:.3e})", s, r)).collect::<Vec<_>>().join(", "));
                 if sufficient_segs < 20 {
                     let w = "Not enough MAF data for karyotyping!".to_string();
                     warn!("{}", w);
@@ -948,7 +983,7 @@ pub fn call_karyotype(
     }
 
     // Infer CN states (predict_karyo_v2 + MAF logic)
-    let (cn1, cn2, cn3) = resolve_cn_states(&levels, levels_maf_peaks.as_ref(), &mut warnings);
+    let (cn1, cn2, cn3) = resolve_cn_states(&levels, levels_maf_peaks.as_ref(), &mut warnings, thresholds.maf_peak_diploid);
 
     debug!(
         "Estimated levels: CN1={:.2}, CN2={:.2}, CN3={:.2}",
@@ -1253,6 +1288,7 @@ fn resolve_cn_states(
     levels: &[(f64, usize)],
     maf_peaks: Option<&HashMap<usize, f64>>,
     warnings: &mut Vec<String>,
+    maf_peak_diploid: f64,
 ) -> (f64, f64, f64) {
     if levels.is_empty() {
         return (1.0, 2.0, 3.0);
@@ -1279,7 +1315,7 @@ fn resolve_cn_states(
     if sorted_levels.len() < 2 || (v2 - v1).abs() < 0.05 {
         // Check MAF
         if let Some(peaks) = maf_peaks && let Some(&peak) = peaks.get(&0) {
-            if peak > 0.4 {
+            if peak >= maf_peak_diploid {
                 debug!("Single level, MAF peak {:.2} confirms 2n", peak);
                 return (v1 * 0.5, v1, v1 * 1.5);
             } else {
@@ -1731,6 +1767,7 @@ pub fn call_karyotype_gc_corrected(
     thresholds: &KaryotypeThresholds,
     gc_correction: GcCorrectionMethod,
     seg_bases: Option<&HashMap<String, usize>>,
+    enriched: Option<&[BedRegion]>,
 ) -> Result<KaryotypeOutput, Box<dyn std::error::Error>> {
     // Pass 1: initial karyotype
     info!("=== GC Correction Pass 1: Initial karyotype ===");
@@ -1792,7 +1829,7 @@ pub fn call_karyotype_gc_corrected(
 
     // Plot combined karyotype + BAF
     if let Some(maf_p) = maf_path {
-        match parse_maf_for_plot(maf_p, ref_config, thresholds.min_depth) {
+        match parse_maf_for_plot(maf_p, ref_config, thresholds.min_depth, enriched) {
             Ok(baf_data) => {
                 let combined_path = format!("{}.karyotype_baf.gc_corrected.svg", out_prefix);
                 plot::plot_karyotype_with_baf(

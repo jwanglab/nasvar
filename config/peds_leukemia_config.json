@@ -160,7 +160,7 @@
     "karyotype": {
       "spread_warning": 0.08,
       "level_tolerance": 0.3,
-      "maf_peak_diploid": 0.4,
+      "maf_peak_diploid": 0.35,
       "min_maf_sites": 50
     }
   }

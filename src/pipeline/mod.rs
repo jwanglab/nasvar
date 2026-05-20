@@ -6,7 +6,7 @@ use crate::config::PipelineConfig;
 use crate::output::{OutputCollector, FusionsOutput, UnifiedOutput};
 use crate::utils::bed::BedRegion;
 use crate::utils::qc::PipelineQcData;
-use crate::var::maf::Site;
+use crate::var::maf::{Site, filter_enriched_sites};
 use crate::var::fusions::FusionAccumulator;  // Shared fusion accumulator
 use crate::var::coverage::CoverageAccumulator;  // Shared coverage accumulator
 use crate::utils::annotation::PartnerGeneIndex;
@@ -125,10 +125,13 @@ impl<'a> PipelineRunner<'a> {
         };
 
         // MAF accumulator
-        let mut maf_acc = self
-            .maf_sites
-            .as_ref()
-            .map(|sites| MafAccumulator::new(&header, sites.clone()));
+        let mut maf_acc = self.maf_sites.as_ref().map(|sites| {
+            let mut filtered = sites.clone();
+            if let Some(regions) = &self.maf_regions {
+                filter_enriched_sites(&mut filtered, regions);
+            }
+            MafAccumulator::new(&header, filtered)
+        });
 
         // Fusion accumulator requires config for per-gene margins
         let mut fusion_acc = if let Some(targets) = &self.fusion_targets {

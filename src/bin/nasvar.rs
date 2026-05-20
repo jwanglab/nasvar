@@ -122,10 +122,10 @@ enum Commands {
         /// Path to MAF file.
         #[arg(long)]
         maf: Option<String>,
-        /// Path to SNP sites file (used with --enriched to check MAF data sufficiency).
+        /// Path to variable sites file (used with --enriched to check MAF data sufficiency and filter the BAF plot).
         #[arg(long)]
         sites: Option<String>,
-        /// Path to enriched regions BED file (used with --sites to check MAF data sufficiency).
+        /// Path to enriched regions BED file (used with --sites to check MAF data sufficiency and filter the BAF plot to enriched regions only).
         #[arg(long)]
         enriched: Option<String>,
         /// Prefix for output files.
@@ -188,6 +188,9 @@ enum Commands {
         /// Reference genome FASTA (required for CRAM input).
         #[arg(long)]
         ref_fasta: Option<String>,
+        /// BED file containing repetitive elements to mask.
+        #[arg(long)]
+        repeats: Option<String>,
         /// BED file containing enriched regions (targets) to prioritize.
         #[arg(long, required = true)]
         enriched: String,
@@ -599,7 +602,7 @@ fn main() {
             karyo_thresholds.plot_y_percentile = *plot_y_percentile;
 
             // Compute seg_bases for MAF sufficiency check if sites and enriched are provided
-            let seg_bases = match (sites, enriched) {
+            let (seg_bases, enriched_regions) = match (sites, enriched) {
                 (Some(s), Some(e)) => {
                     let e_vec = match read_bed(e) {
                         Ok(v) => v,
@@ -609,12 +612,13 @@ fn main() {
                         Ok(v) => v,
                         Err(err) => { error!("Error reading sites {}: {}", s, err); return; }
                     };
-                    Some(nasvar::karyotype::compute_seg_bases(&s_vec, &e_vec, &ref_config))
+                    let sb = nasvar::karyotype::compute_seg_bases(&s_vec, &e_vec, &ref_config);
+                    (Some(sb), Some(e_vec))
                 }
-                _ => None,
+                _ => (None, None),
             };
 
-            match nasvar::karyotype::call_karyotype_gc_corrected(coverage, maf.as_deref(), out_prefix, None, &ref_config, &karyo_thresholds, *gc_correction, seg_bases.as_ref()) {
+            match nasvar::karyotype::call_karyotype_gc_corrected(coverage, maf.as_deref(), out_prefix, None, &ref_config, &karyo_thresholds, *gc_correction, seg_bases.as_ref(), enriched_regions.as_deref()) {
                 Ok(karyo_output) => {
                     let collector = OutputCollector::new().with_karyotype(karyo_output);
                     if let Err(e) = collector.write_to_prefix(out_prefix) {
@@ -743,6 +747,7 @@ fn main() {
         Commands::Maf {
             bam,
             ref_fasta,
+            repeats,
             enriched,
             sites,
             out_prefix,
@@ -767,13 +772,23 @@ fn main() {
                     return;
                 }
             };
-            let s_vec = match read_sites(sites) {
+            let mut s_vec = match read_sites(sites) {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Error reading sites: {}", e);
                     return;
                 }
             };
+            if let Some(repeats_path) = repeats {
+                let r_vec = match read_bed(repeats_path) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("Error reading repeats: {}", e);
+                        return;
+                    }
+                };
+                filter_repeat_sites(&mut s_vec, &r_vec);
+            }
             if let Err(e) = calc_maf(&mut br, &e_vec, &s_vec, out_prefix) {
                 error!("Error calculating MAF: {}", e);
             }
@@ -991,6 +1006,7 @@ fn main() {
                 &karyo_thresholds,
                 *gc_correction,
                 Some(&seg_bases),
+                Some(&e_vec),
             ) {
                 Ok(karyo_output) => {
                     let br = karyo_output.blast_ratio;

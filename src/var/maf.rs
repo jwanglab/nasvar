@@ -61,6 +61,38 @@ pub fn read_sites(path: &str) -> Result<Vec<Vec<Site>>, Box<dyn std::error::Erro
     Ok(sites)
 }
 
+/// Keep only sites that fall within enriched BED regions.
+pub fn filter_enriched_sites(sites: &mut [Vec<Site>], enriched: &[BedRegion]) {
+    let mapper = ContigMapper::new();
+
+    let mut enriched_by_chr: Vec<Vec<(usize, usize)>> = vec![Vec::new(); NUM_CHROMOSOMES];
+    for r in enriched {
+        if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < NUM_CHROMOSOMES {
+            enriched_by_chr[idx].push((r.start as usize, r.end as usize));
+        }
+    }
+    for intervals in &mut enriched_by_chr {
+        intervals.sort_unstable();
+    }
+
+    for (chr_idx, chr_sites) in sites.iter_mut().enumerate() {
+        if chr_idx >= NUM_CHROMOSOMES { break; }
+        let intervals = &enriched_by_chr[chr_idx];
+        if intervals.is_empty() {
+            chr_sites.clear();
+            continue;
+        }
+        chr_sites.retain(|site| {
+            let i = intervals.partition_point(|&(start, _)| start <= site.pos);
+            if i == 0 {
+                return false;
+            }
+            let (_, end) = intervals[i - 1];
+            site.pos < end
+        });
+    }
+}
+
 /// Remove sites that fall within repeat/masked BED regions.
 pub fn filter_repeat_sites(sites: &mut [Vec<Site>], repeats: &[BedRegion]) {
     let mapper = ContigMapper::new();

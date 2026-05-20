@@ -7,6 +7,7 @@ This guide walks through setting up and running a complete nasvar analysis on a 
 - **Rust** (edition 2024): https://rustup.rs
 - **samtools**: for indexing BAM and FASTA files
 - **bcftools** (optional): only needed if building a custom MAF sites file
+- **bedtools** (optional): only needed for intersecting MAF sites with enrichment BED
 - **minimap2** (or similar): for aligning reads to the reference genome
 
 ## 1. Build and install nasvar
@@ -113,7 +114,24 @@ bcftools view -G -H -O v -AA -a --known -U -v snps -c 10 \
   > maf_sites.tsv
 ```
 
-Optionally intersect with your enrichment BED to restrict to on-target sites.
+**Intersect with your enrichment BED to restrict to on-target sites (recommended):**
+
+The sites file uses `chr*` chromosome names while the enrichment BED uses NCBI accession names (`NC_060925.1` etc.). Convert and intersect with `bedtools`:
+
+```bash
+# Convert enrichment BED from NC_* accessions to chr* names, then intersect:
+bedtools intersect \
+  -a <(awk '{print $1 "\t" ($2-1) "\t" $2 "\t" $3 "\t" $4}' maf_sites.tsv) \
+  -b <(awk 'BEGIN {
+        for (i=1; i<=22; i++) acc[sprintf("NC_%06d.1", 60924+i)] = "chr" i
+        acc["NC_060947.1"] = "chrX"
+        acc["NC_060948.1"] = "chrY"
+      } $1 in acc { print acc[$1] "\t" $2 "\t" $3 }' enriched.bed) \
+  | awk '{print $1 "\t" $3 "\t" $4 "\t" $5}' \
+  > maf_sites.enriched.tsv
+```
+
+Use `maf_sites.enriched.tsv` in place of `maf_sites.tsv` for all subsequent steps. Restricting to on-target sites substantially reduces file size and speeds up MAF pileup.
 
 ## 4. Configuration files
 
@@ -330,10 +348,15 @@ nasvar coverage --bam sample.bam --repeats repeats.bed --out-prefix results/samp
 # MAF only
 nasvar maf --bam sample.bam --enriched enriched.bed --sites maf_sites.tsv --out-prefix results/sample/sample
 
+# MAF only (with repeat masking)
+nasvar maf --bam sample.bam --repeats repeats.bed --enriched enriched.bed --sites maf_sites.tsv --out-prefix results/sample/sample
+
 # Karyotype from pre-computed coverage/MAF
 nasvar karyotype \
   --coverage results/sample/sample.coverage.tsv \
   --maf results/sample/sample.maf \
+  --enriched enriched.bed \
+  --sites maf_sites.tsv \
   --out-prefix results/sample/sample \
   --config config/peds_leukemia_config.json \
   --reference config/T2T-CHM13v2.0_reference.json

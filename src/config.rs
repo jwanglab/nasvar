@@ -244,7 +244,7 @@ pub struct KaryotypeThresholds {
 
 fn default_spread_warning() -> f64 { 0.08 }
 fn default_level_tolerance() -> f64 { 0.3 }
-fn default_maf_peak_diploid() -> f64 { 0.4 }
+fn default_maf_peak_diploid() -> f64 { 0.35 }
 fn default_min_maf_sites() -> usize { 50 }
 fn default_plot_y_percentile() -> f64 { 0.95 }
 
