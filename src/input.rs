@@ -680,6 +680,11 @@ pub struct AlignmentInput {
     pub start_pos: u64,
     /// Original path passed to open() (list file or single BAM)
     input_path: String,
+    /// Per-BAM paths resolved at open() time. For a single-BAM input this is
+    /// [input_path]; for a `.list`/`.txt` input this is the parsed contents
+    /// captured at that moment. Downstream phases (notably the slice writer)
+    /// reuse this so they don't re-read the list file later. (ask me how I know)
+    resolved_paths: Vec<String>,
     /// Count of malformed records skipped (SAM only)
     skipped_records: u64,
 }
@@ -715,6 +720,7 @@ impl AlignmentInput {
             contig_mapper,
             start_pos: 0,
             input_path: path.to_string(),
+            resolved_paths: vec![path.to_string()],
             skipped_records: 0,
         })
     }
@@ -752,6 +758,8 @@ impl AlignmentInput {
 
         info!("Multi-BAM: opened {} files from {}", readers.len(), list_path);
 
+        let resolved_paths: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
+
         Ok(AlignmentInput {
             readers,
             current_reader_idx: 0,
@@ -760,6 +768,7 @@ impl AlignmentInput {
             contig_mapper,
             start_pos: 0,
             input_path: list_path.to_string(),
+            resolved_paths,
             skipped_records: 0,
         })
     }
@@ -1118,6 +1127,18 @@ impl AlignmentInput {
         Ok(())
     }
 
+    /// Inline-built BAI index per reader (None for readers that loaded an
+    /// on-disk .bai from the user). Used to hand the in-memory index to
+    /// downstream consumers (e.g. the variant-region slice) so they don't
+    /// pay the cost — and the risk — of a disk round-trip via
+    /// `bam::bai::fs::write` + `read`.
+    pub fn inline_indices(&self) -> Vec<Option<bam::bai::Index>> {
+        self.readers
+            .iter()
+            .map(|r| r.inline_built_index.clone())
+            .collect()
+    }
+
     /// Check that all readers have an index, returning a clear error if not.
     pub fn require_index(&self, path: &str) -> Result<()> {
         if self.readers.len() == 1 {
@@ -1163,6 +1184,11 @@ impl AlignmentInput {
     /// Returns the original path passed to open() (list file or single BAM path).
     pub fn input_path(&self) -> &str {
         &self.input_path
+    }
+
+    /// Returns the per-BAM paths that this input was opened against
+    pub fn resolved_paths(&self) -> &[String] {
+        &self.resolved_paths
     }
 }
 

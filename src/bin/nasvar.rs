@@ -1138,10 +1138,17 @@ fn main() {
             }
 
             // Variant-region slice BAM: dump reads around every called SNV /
-            // ITD / fusion into <prefix>.slice.bam (+ .bai)
+            // ITD / fusion into <prefix>.slice.bam (+ .bai). Pass the pipe-
+            // line's in-memory inline-built BAI directly so the slice
+            // reader doesn't have to round-trip through bam::bai::fs::write
+            // + read -- that path loses chunk entries for supplementary
+            // records (chimeric fusion reads, etc.) in noodles 0.104.
             let unified = collector.build();
+            let src_indices = br.inline_indices();
+            // Use the BAM paths resolved at pipeline start.
+            let src_bams: Vec<String> = br.resolved_paths().to_vec();
             if let Err(e) = nasvar::var::slice::dump_variant_slice(
-                &unified, bam, Some(fasta), gff, Some(&t_vec), out_prefix,
+                &unified, &src_bams, &src_indices, Some(fasta), gff, Some(&t_vec), out_prefix,
             ) {
                 warn!("[slice] dump failed: {}", e);
             }

@@ -34,6 +34,10 @@ use noodles::csi::binning_index::{
     Indexer as CsiIndexer,
 };
 use noodles::sam::alignment::record::cigar::op::Kind as CigarKind;
+use noodles::sam::header::record::value::{
+    map::{program::tag as pg_tag, Program},
+    Map,
+};
 
 use crate::output::{FusionBreakpoint, GeneInfo, UnifiedOutput};
 use crate::utils::annotation::{GeneBounds, PartnerGeneIndex};
@@ -47,6 +51,11 @@ pub const DEFAULT_FUSION_PAD: u32 = 50_000;
 /// breakpoint position. The named partner still gets full gene bounds +
 /// `DEFAULT_FUSION_PAD` like a two-sided fusion.
 pub const FUSION_INTERGENIC_PAD: u32 = 10_000;
+/// CNV/SV: pad applied around each breakpoint (start and end separately).
+/// The full SV span can be megabases for arm-level events, so we only
+/// capture reads flanking the actual junction, not the entire deleted /
+/// duplicated interval.
+pub const DEFAULT_CNV_BREAKPOINT_PAD: u32 = 10_000;
 
 /// Build a name → bounds map from a fusion-targets BED (the file used by
 /// fusion calling). Multiple rows for the same gene name are unioned: the
@@ -96,6 +105,7 @@ pub fn compute_slice_regions(
     snv_pad: u32,
     itd_pad: u32,
     fusion_pad: u32,
+    cnv_breakpoint_pad: u32,
 ) -> Result<Vec<(String, u32, u32)>> {
     // Collect every gene name we'll need so a single GFF pass picks them up.
     let mut wanted: HashSet<String> = HashSet::new();
@@ -164,6 +174,27 @@ pub fn compute_slice_regions(
             for ev in events {
                 if ev.position < 0 { continue; }
                 pad(&bounds.chrom, ev.position as u32, itd_pad, &mut regions);
+            }
+        }
+    }
+
+    // CNVs: pad each SV breakpoint (start and end separately) by
+    // `cnv_breakpoint_pad`. We deliberately *don't* slice the full SV span
+    // -- arm-level deletions can be hundreds of Mb and would explode the
+    // slice -- just enough flanking reads at each junction to visualize
+    // the breakpoints in the viewer.
+    if let Some(cnv) = &unified.cnv {
+        for gene_info in cnv.genes.values() {
+            let dels = gene_info.deletions.iter().flatten();
+            let dups = gene_info.duplications.iter().flatten();
+            for sv in dels.chain(dups) {
+                let Some(chrom) = sv.chrom.as_deref() else { continue; };
+                if sv.start >= 0 {
+                    pad(chrom, sv.start as u32, cnv_breakpoint_pad, &mut regions);
+                }
+                if sv.end >= 0 && sv.end != sv.start {
+                    pad(chrom, sv.end as u32, cnv_breakpoint_pad, &mut regions);
+                }
             }
         }
     }
@@ -263,35 +294,18 @@ fn merge_regions(mut regions: Vec<(String, u32, u32)>) -> Vec<(String, u32, u32)
     out
 }
 
-/// Resolve a `--bam` argument into its underlying BAM paths: a `.txt`/`.list`
-/// file-of-filenames expands to its line entries; anything else is treated
-/// as a single BAM path.
-fn resolve_bam_paths(src: &str) -> Result<Vec<String>> {
-    if src.ends_with(".txt") || src.ends_with(".list") {
-        let content = std::fs::read_to_string(src)
-            .map_err(|e| anyhow!("read BAM list {}: {}", src, e))?;
-        let paths: Vec<String> = content
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .map(|s| s.to_string())
-            .collect();
-        if paths.is_empty() {
-            return Err(anyhow!("BAM list {} contains no paths", src));
-        }
-        Ok(paths)
-    } else {
-        Ok(vec![src.to_string()])
-    }
-}
-
 /// Write a slice BAM containing only reads overlapping `regions`, plus a
 /// BAI alongside it. Reads are deduplicated across overlapping queries and
-/// across multiple source BAMs by (ref_id, pos, flag, qname). For multi-BAM
-/// input, every source must already have a `<path>.bai` (the pipeline's
-/// inline-index builder writes one per reader at the end of pass 1).
+/// across multiple source BAMs by (ref_id, pos, flag, qname).
+///
+/// `src_indices` is an optional in-memory BAI per source BAM. When the
+/// pipeline built the index inline during pass 1, passing it directly
+/// here is preferable to the disk round-trip (write to `<path>.bai` then
+/// read back). None elements fall back to reading `<path>.bai`
+/// from disk.
 pub fn write_slice_bam(
     src_bams: &[String],
+    src_indices: &[Option<bam::bai::Index>],
     regions: &[(String, u32, u32)],
     out_bam: &str,
 ) -> Result<usize> {
@@ -309,16 +323,21 @@ pub fn write_slice_bam(
     let mut readers: Vec<bam::io::IndexedReader<bgzf::io::Reader<File>>> =
         Vec::with_capacity(src_bams.len());
     let mut canonical_header: Option<noodles::sam::Header> = None;
-    for path in src_bams {
-        let bai_path = format!("{}.bai", path);
-        if !Path::new(&bai_path).exists() {
-            return Err(anyhow!(
-                "slice requires {}; pipeline should have built one inline",
-                bai_path
-            ));
-        }
-        let index = bam::bai::fs::read(&bai_path)
-            .map_err(|e| anyhow!("read bai {}: {}", bai_path, e))?;
+    for (i, path) in src_bams.iter().enumerate() {
+        let index = match src_indices.get(i).and_then(|o| o.clone()) {
+            Some(idx) => idx,
+            None => {
+                let bai_path = format!("{}.bai", path);
+                if !Path::new(&bai_path).exists() {
+                    return Err(anyhow!(
+                        "slice requires {}; pipeline should have built one inline",
+                        bai_path
+                    ));
+                }
+                bam::bai::fs::read(&bai_path)
+                    .map_err(|e| anyhow!("read bai {}: {}", bai_path, e))?
+            }
+        };
         let mut reader = bam::io::indexed_reader::Builder::default()
             .set_index(index)
             .build_from_path(path)
@@ -330,7 +349,23 @@ pub fn write_slice_bam(
         }
         readers.push(reader);
     }
-    let header = canonical_header.unwrap();
+    let mut header = canonical_header.unwrap();
+
+    // Stamp our own @PG record into the slice's header chain so the slice
+    // is self-documenting: which BAM(s) were sliced, and by what version of
+    // nasvar.
+    append_nasvar_pg(&mut header, src_bams, regions.len());
+
+    // Translate region chrom names to the BAM's naming convention before
+    // querying. Variant outputs source chroms from a mix of places (targets
+    // BED, GFF, BAM directly), so a region might have `chr19` when the BAM
+    // uses `NC_060943.1` (or vice versa)
+    let bam_refs: Vec<String> = header
+        .reference_sequences()
+        .iter()
+        .map(|(name, _)| String::from_utf8_lossy(name.as_ref()).to_string())
+        .collect();
+    let contig_mapper = crate::bam::ContigMapper::from_refs(&bam_refs);
 
     // Sink: BAM writer over a bgzf writer.
     let out_file = File::create(out_bam)
@@ -343,13 +378,32 @@ pub fn write_slice_bam(
     let mut seen: HashSet<(i32, i32, u16, Vec<u8>)> = HashSet::new();
     let mut written = 0usize;
 
-    for (chrom, start, end) in regions {
+    // Translate region chroms to BAM convention up front, attach the
+    // header ref_id, and resort by (ref_id, start). compute_slice_regions
+    // sorts by chrom *string*, which doesn't match BAM ref_id ordering
+    // when variants mix naming conventions (e.g. CNV outputs use "chr7"
+    // while fusion outputs use "NC_060935.1") -- writing in string order
+    // then breaks the BAI build, which needs coordinate-sorted input.
+    let mut sorted_regions: Vec<(String, u32, u32, i32)> = regions
+        .iter()
+        .map(|(c, s, e)| {
+            let bam_chrom = contig_mapper.to_bam_name(c);
+            let ref_id = bam_refs.iter()
+                .position(|r| r == &bam_chrom)
+                .map(|i| i as i32)
+                .unwrap_or(-1);
+            (bam_chrom, *s, *e, ref_id)
+        })
+        .collect();
+    sorted_regions.sort_by(|a, b| a.3.cmp(&b.3).then(a.1.cmp(&b.1)));
+
+    for (bam_chrom, start, end, _ref_id) in &sorted_regions {
         // Region coordinates are 1-based inclusive for Region::new.
-        let s_pos = Position::try_from(start.max(&1).clone() as usize)
+        let s_pos = Position::try_from((*start).max(1) as usize)
             .map_err(|e| anyhow!("region start: {}", e))?;
-        let e_pos = Position::try_from((*end).max(*start.max(&1)) as usize)
+        let e_pos = Position::try_from((*end).max((*start).max(1)) as usize)
             .map_err(|e| anyhow!("region end: {}", e))?;
-        let region = Region::new(chrom.as_bytes().to_vec(), s_pos..=e_pos);
+        let region = Region::new(bam_chrom.as_bytes().to_vec(), s_pos..=e_pos);
 
         // Pull records from every reader into one bucket, then sort by
         // (ref_id, pos) so the output stays coordinate-sorted (required for
@@ -362,7 +416,7 @@ pub fn write_slice_bam(
                 Err(e) => {
                     warn!(
                         "[slice] query failed for {}:{}-{}: {} — skipping",
-                        chrom, start, end, e
+                        bam_chrom, start, end, e
                     );
                     continue;
                 }
@@ -424,9 +478,42 @@ pub fn write_slice_bam(
 /// emit `<out_prefix>.slice.fa` + `.fai` containing just the bases that
 /// cover the slice regions, so a downstream viewer can render mismatch
 /// ticks without needing the full reference.
+/// Append a `nasvar`-authored `@PG` entry to the slice header so the
+/// produced BAM records which input(s) it was sliced from and which version
+/// did the slicing. `Programs::add` auto-chains the new entry under the
+/// existing leaf via `PP:`, so the source's program history is preserved
+/// intact above ours.
+fn append_nasvar_pg(
+    header: &mut noodles::sam::Header,
+    src_bams: &[String],
+    region_count: usize,
+) {
+    let cl = format!(
+        "nasvar slice --regions {} --inputs {}",
+        region_count,
+        src_bams.join(","),
+    );
+    let map = match Map::<Program>::builder()
+        .insert(pg_tag::NAME, "nasvar")
+        .insert(pg_tag::VERSION, env!("CARGO_PKG_VERSION"))
+        .insert(pg_tag::COMMAND_LINE, cl)
+        .build()
+    {
+        Ok(m) => m,
+        Err(e) => {
+            warn!("[slice] could not build @PG map ({}); slice header will omit nasvar provenance", e);
+            return;
+        }
+    };
+    if let Err(e) = header.programs_mut().add("nasvar", map) {
+        warn!("[slice] could not append @PG ({}); slice header will omit nasvar provenance", e);
+    }
+}
+
 pub fn dump_variant_slice(
     unified: &UnifiedOutput,
-    src_bam: &str,
+    src_bams: &[String],
+    src_indices: &[Option<bam::bai::Index>],
     ref_path: Option<&str>,
     gff_path: &str,
     fusion_targets: Option<&[BedRegion]>,
@@ -435,6 +522,7 @@ pub fn dump_variant_slice(
     let regions = compute_slice_regions(
         unified, gff_path, fusion_targets,
         DEFAULT_SNV_PAD, DEFAULT_ITD_PAD, DEFAULT_FUSION_PAD,
+        DEFAULT_CNV_BREAKPOINT_PAD,
     )?;
     if regions.is_empty() {
         info!("[slice] no variant regions to slice");
@@ -443,9 +531,8 @@ pub fn dump_variant_slice(
     let total_bp: u64 = regions.iter().map(|r| (r.2 - r.1) as u64).sum();
     info!("[slice] {} merged regions, total span {} bp", regions.len(), total_bp);
 
-    let src_bams = resolve_bam_paths(src_bam)?;
     let bam_out = format!("{}.slice.bam", out_prefix);
-    write_slice_bam(&src_bams, &regions, &bam_out)?;
+    write_slice_bam(src_bams, src_indices, &regions, &bam_out)?;
     let bai_out = format!("{}.bai", bam_out);
 
     // Best-effort: a slice FASTA is useful but not load-bearing for the BAM.
