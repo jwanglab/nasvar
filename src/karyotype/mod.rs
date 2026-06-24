@@ -659,7 +659,13 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         let mut v = vals.clone();
         v.sort_by(|a, b| a.total_cmp(b));
         if !v.is_empty() {
-            medians.insert(chr.clone(), v[v.len() / 2]);
+            let mid = v.len() / 2;
+            let median = if v.len() % 2 == 0 {
+                (v[mid - 1] + v[mid]) / 2.0
+            } else {
+                v[mid]
+            };
+            medians.insert(chr.clone(), median);
         }
     }
 
@@ -923,7 +929,13 @@ pub fn call_karyotype(
         let mut v = vals.clone();
         v.sort_by(|a, b| a.total_cmp(b));
         if !v.is_empty() {
-            medians.insert(chr.clone(), v[v.len() / 2]);
+            let mid = v.len() / 2;
+            let median = if v.len() % 2 == 0 {
+                (v[mid - 1] + v[mid]) / 2.0
+            } else {
+                v[mid]
+            };
+            medians.insert(chr.clone(), median);
         }
     }
 
