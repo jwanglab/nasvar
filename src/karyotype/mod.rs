@@ -616,6 +616,9 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
     // Sort by height descending (already sorted, but kept_indices order may differ)
     peaks.sort_by(|a, b| b.1.cmp(&a.1));
 
+    debug!("After peak finding: {} peaks: [{}]", peaks.len(),
+        peaks.iter().map(|(v, c)| format!("{:.1} ({})", v, c)).collect::<Vec<_>>().join(", "));
+
     // 5. Fine tune peaks
     // Median of points under peak +- 1.5 bins
     let mut refined_peaks = Vec::new();
@@ -646,11 +649,17 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         return Vec::new();
     }
 
+    debug!("After refinement: {} peaks: [{}]", refined_peaks.len(),
+        refined_peaks.iter().map(|(v, c)| format!("{:.1} ({})", v, c)).collect::<Vec<_>>().join(", "));
+
     // 6. Filter by height (> 5% of max)
     // Safety: refined_peaks is non-empty (checked above)
     let max_height = refined_peaks.iter().map(|x| x.1).max().unwrap();
     let threshold = max_height as f64 * 0.05;
     refined_peaks.retain(|x| x.1 as f64 > threshold);
+
+    debug!("After height filter (>5% of max={}): {} peaks: [{}]", max_height, refined_peaks.len(),
+        refined_peaks.iter().map(|(v, c)| format!("{:.1} ({})", v, c)).collect::<Vec<_>>().join(", "));
 
     // 7. Filter: must have segments assigned
     // Calculate medians for each segment
@@ -674,6 +683,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
     // (levels with only sex chromosomes shouldn't define tumor ploidy)
     let level_values: Vec<f64> = refined_peaks.iter().map(|(v, _)| *v).collect();
     let mut level_autosomal_counts: HashMap<usize, usize> = HashMap::new();
+    let mut level_segments: HashMap<usize, Vec<String>> = HashMap::new();
 
     for (chr, med) in &medians {
         // Find closest level (argmin of |level/median - 1|)
@@ -691,7 +701,13 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         let is_autosome = chr != "X" && chr != "Y";
         if best_ratio_diff < 0.3 && is_autosome {
             *level_autosomal_counts.entry(best_idx).or_insert(0) += 1;
+            level_segments.entry(best_idx).or_default().push(format!("{}({:.1})", chr, med));
         }
+    }
+
+    for (i, (lvl, _)) in refined_peaks.iter().enumerate() {
+        let segs = level_segments.get(&i).map(|v| v.join(", ")).unwrap_or_else(|| "none".to_string());
+        debug!("Level {:.1}: segments [{}]", lvl, segs);
     }
 
     // Keep only levels with at least one autosomal segment assigned
@@ -701,6 +717,9 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
             active_peaks.push((p_val, p_count));
         }
     }
+
+    debug!("After segment filter: {} peaks: [{}]", active_peaks.len(),
+        active_peaks.iter().map(|(v, c)| format!("{:.1} ({})", v, c)).collect::<Vec<_>>().join(", "));
 
     // 8. Filter duplicates (close peaks)
     // Tolerance 9.5%
@@ -731,6 +750,9 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
             }
         }
     }
+
+    debug!("After duplicate filter: {} peaks: [{}]", final_peaks.len(),
+        final_peaks.iter().map(|(v, c)| format!("{:.1} ({})", v, c)).collect::<Vec<_>>().join(", "));
 
     final_peaks
 }
