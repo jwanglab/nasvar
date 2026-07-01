@@ -917,7 +917,11 @@ pub fn call_karyotype(
         warnings.push(w);
     }
 
-    let levels = find_levels(&chrom_bins);
+    let bins_for_levels: HashMap<String, Vec<f64>> = chrom_bins.iter()
+        .filter(|(k, _)| k.as_str() != "17p" && k.as_str() != "19q")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let levels = find_levels(&bins_for_levels);
     info!("Found {} valid coverage levels.", levels.len());
     for (l, c) in &levels {
         debug!("Level: {:.4} (count {})", l, c);
