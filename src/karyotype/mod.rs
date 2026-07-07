@@ -1393,30 +1393,24 @@ fn resolve_cn_states(
             let d1 = (p1 - 0.5_f64).abs();
             let d2 = (p2 - 0.5_f64).abs();
 
-            if (d1 - d2).abs() > 0.04 {
-                // Meaningful difference — use closest-to-0.5 as diploid
-                if d1 < d2 {
-                    debug!(
-                        "MAF closest-to-0.5: v1 is diploid (MAF {:.4}, d={:.4}). v2 is CN3.",
-                        p1, d1
-                    );
-                    return (2.0 * v1 - v2, v1, v2);
-                } else {
-                    debug!(
-                        "MAF closest-to-0.5: v2 is diploid (MAF {:.4}, d={:.4}). v1 is CN1.",
-                        p2, d2
-                    );
-                    return (v1, v2, v2 + (v2 - v1));
-                }
+            if (d1 - d2).abs() < 0.04 {
+                let w = "MAF signals for the top two levels are too close. This may indicate low blast ratio.".to_string();
+                warn!("{}", w);
+                warnings.push(w);
             }
-
-            let w = "MAF signals for the top two levels are too close. This may indicate low blast ratio.".to_string();
-            warn!("{}", w);
-            warnings.push(w);
-            debug!(
-                "MAF distances from 0.5 too similar (d1={:.4}, d2={:.4}). Falling back to ratio logic.",
-                d1, d2
-            );
+            if d1 < d2 {
+                debug!(
+                    "MAF closest-to-0.5: v1 is diploid (MAF {:.4}, d={:.4}). v2 is CN3.",
+                    p1, d1
+                );
+                return (2.0 * v1 - v2, v1, v2);
+            } else {
+                debug!(
+                    "MAF closest-to-0.5: v2 is diploid (MAF {:.4}, d={:.4}). v1 is CN1.",
+                    p2, d2
+                );
+                return (v1, v2, v2 + (v2 - v1));
+            }
         } else if p1 > 0.4 {
             // Case 1: Only lower level has high MAF (>0.4)
             // Coverage ratio sanity check: if v2/v1 >= 1.6, the levels are actually 1n/2n
