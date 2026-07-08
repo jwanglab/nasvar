@@ -6,7 +6,7 @@ use log::{info, warn, error};
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use nasvar::config::{PipelineConfig, ReferenceConfig};
+use nasvar::config::{Contig, PipelineConfig, ReferenceConfig};
 use nasvar::input::AlignmentInput;
 use nasvar::output::{OutputCollector, UnifiedOutput};
 use nasvar::utils::bed::read_bed;
@@ -63,6 +63,9 @@ impl LogLevel {
 enum Commands {
     /// Call Single Nucleotide Variants
     Snv {
+        /// Reference config JSON: contig name<->accession map, centromeres, PAR.
+        #[arg(long, required = true)]
+        reference: String,
         /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
@@ -153,6 +156,9 @@ enum Commands {
     },
     /// Call Gene Fusions
     Fusions {
+        /// Reference config JSON: contig name<->accession map, centromeres, PAR.
+        #[arg(long, required = true)]
+        reference: String,
         /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
@@ -183,6 +189,9 @@ enum Commands {
     },
     /// Calculate Minor Allele Frequencies
     Maf {
+        /// Reference config JSON: contig name<->accession map, centromeres, PAR.
+        #[arg(long, required = true)]
+        reference: String,
         /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
@@ -207,6 +216,9 @@ enum Commands {
     },
     /// Calculate Read Depth / Coverage
     Coverage {
+        /// Reference config JSON: contig name<->accession map, centromeres, PAR.
+        #[arg(long, required = true)]
+        reference: String,
         /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
@@ -282,6 +294,9 @@ enum Commands {
     },
     /// Call Internal Tandem Duplications (ITDs)
     Itd {
+        /// Reference config JSON: contig name<->accession map, centromeres, PAR.
+        #[arg(long, required = true)]
+        reference: String,
         /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
@@ -300,6 +315,9 @@ enum Commands {
     },
     /// Build consensus sequences for fusion breakpoints
     Breakpoints {
+        /// Reference config JSON: contig name<->accession map, centromeres, PAR.
+        #[arg(long, required = true)]
+        reference: String,
         /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
         bam: String,
@@ -324,6 +342,9 @@ enum Commands {
     },
     /// Plot focal read-depth coverage for configured regions
     FocalDepth {
+        /// Reference config JSON: contig name<->accession map, centromeres, PAR.
+        #[arg(long, required = true)]
+        reference: String,
         /// Alignment file (BAM/CRAM/SAM), sorted and indexed.
         #[arg(long, required = true)]
         bam: String,
@@ -391,11 +412,11 @@ fn check_output_paths(
 // Helper to open reader correctly typed
 // noodles::bam::io::reader::Builder returns Reader<File> (which is Reader<std::io::Reader<File>>)
 
-fn get_alignment_reader(path: &str, ref_path: Option<&str>) -> Result<AlignmentInput, Box<dyn std::error::Error>> {
+fn get_alignment_reader(path: &str, ref_path: Option<&str>, contigs: &[Contig]) -> Result<AlignmentInput, Box<dyn std::error::Error>> {
     // AlignmentInput::open already includes file paths in its errors; flatten
     // the anyhow chain so the underlying cause (e.g. missing FASTA index) is
     // not relabeled as a BAM error.
-    AlignmentInput::open(path, ref_path)
+    AlignmentInput::open(path, ref_path, contigs)
         .map_err(|e| -> Box<dyn std::error::Error> { format!("{:#}", e).into() })
 }
 
@@ -444,6 +465,7 @@ fn main() {
 
     match &cli.command {
         Commands::Snv {
+            reference,
             bam,
             fasta,
             gff,
@@ -457,6 +479,11 @@ fn main() {
                 return;
             }
 
+            let ref_config = match ReferenceConfig::load(reference) {
+                Ok(c) => c,
+                Err(e) => { error!("Error loading reference config {}: {}", reference, e); return; }
+            };
+
             let pipeline_config = match PipelineConfig::load(config) {
                 Ok(c) => c,
                 Err(e) => {
@@ -465,7 +492,7 @@ fn main() {
                 }
             };
 
-            let mut br = match get_alignment_reader(bam, Some(fasta)) {
+            let mut br = match get_alignment_reader(bam, Some(fasta), &ref_config.contigs) {
                 Ok(b) => b,
                 Err(e) => {
                     error!("Error opening alignment file: {}", e);
@@ -519,7 +546,7 @@ fn main() {
                 }
             };
 
-            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref()) {
+            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref(), &ref_config.contigs) {
                 Ok(b) => b,
                 Err(e) => {
                     error!("Error opening alignment file: {}", e);
@@ -605,6 +632,16 @@ fn main() {
             karyo_thresholds.min_depth = *min_depth;
             karyo_thresholds.plot_y_percentile = *plot_y_percentile;
 
+            // Load enriched BED once if provided — used for both MAF sufficiency
+            // (seg_bases) and the BAF-plot off-target filter.
+            let e_vec = match enriched {
+                Some(e) => match read_bed(e) {
+                    Ok(v) => Some(v),
+                    Err(err) => { error!("Error reading enriched BED {}: {}", e, err); return; }
+                },
+                None => None,
+            };
+
             // Compute seg_bases for MAF sufficiency check if sites and enriched are provided
             let (seg_bases, enriched_regions) = match (sites, enriched) {
                 (Some(s), Some(e)) => {
@@ -612,7 +649,7 @@ fn main() {
                         Ok(v) => v,
                         Err(err) => { error!("Error reading enriched BED {}: {}", e, err); return; }
                     };
-                    let s_vec = match read_sites(s) {
+                    let s_vec = match read_sites(s, &ref_config.contigs) {
                         Ok(v) => v,
                         Err(err) => { error!("Error reading sites {}: {}", s, err); return; }
                     };
@@ -633,6 +670,7 @@ fn main() {
             }
         }
         Commands::Fusions {
+            reference,
             bam,
             ref_fasta,
             targets,
@@ -657,7 +695,12 @@ fn main() {
                 }
             };
 
-            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref()) {
+            let ref_config = match ReferenceConfig::load(reference) {
+                Ok(c) => c,
+                Err(e) => { error!("Error loading reference config {}: {}", reference, e); return; }
+            };
+
+            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref(), &ref_config.contigs) {
                 Ok(b) => b,
                 Err(e) => {
                     error!("Error opening alignment file: {}", e);
@@ -749,6 +792,7 @@ fn main() {
             }
         }
         Commands::Maf {
+            reference,
             bam,
             ref_fasta,
             repeats,
@@ -762,7 +806,12 @@ fn main() {
                 return;
             }
 
-            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref()) {
+            let ref_config = match ReferenceConfig::load(reference) {
+                Ok(c) => c,
+                Err(e) => { error!("Error loading reference config {}: {}", reference, e); return; }
+            };
+
+            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref(), &ref_config.contigs) {
                 Ok(b) => b,
                 Err(e) => {
                     error!("Error opening alignment file: {}", e);
@@ -776,7 +825,7 @@ fn main() {
                     return;
                 }
             };
-            let mut s_vec = match read_sites(sites) {
+            let mut s_vec = match read_sites(sites, &ref_config.contigs) {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Error reading sites: {}", e);
@@ -791,13 +840,14 @@ fn main() {
                         return;
                     }
                 };
-                filter_repeat_sites(&mut s_vec, &r_vec);
+                filter_repeat_sites(&mut s_vec, &r_vec, &ref_config.contigs);
             }
             if let Err(e) = calc_maf(&mut br, &e_vec, &s_vec, out_prefix) {
                 error!("Error calculating MAF: {}", e);
             }
         }
         Commands::Coverage {
+            reference,
             bam,
             ref_fasta,
             repeats,
@@ -810,7 +860,12 @@ fn main() {
                 return;
             }
 
-            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref()) {
+            let ref_config = match ReferenceConfig::load(reference) {
+                Ok(c) => c,
+                Err(e) => { error!("Error loading reference config {}: {}", reference, e); return; }
+            };
+
+            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref(), &ref_config.contigs) {
                 Ok(b) => b,
                 Err(e) => {
                     error!("Error opening alignment file: {}", e);
@@ -868,7 +923,16 @@ fn main() {
                 return;
             }
 
-            let mut br = match get_alignment_reader(bam, Some(fasta.as_str())) {
+            // Load reference config (contig map is needed to open the BAM).
+            let ref_config = match ReferenceConfig::load(reference) {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Error loading reference config {}: {}", reference, e);
+                    return;
+                }
+            };
+
+            let mut br = match get_alignment_reader(bam, Some(fasta.as_str()), &ref_config.contigs) {
                 Ok(b) => b,
                 Err(e) => {
                     error!("Error opening alignment file: {}", e);
@@ -892,14 +956,14 @@ fn main() {
                     return;
                 }
             };
-            let mut s_vec = match read_sites(sites) {
+            let mut s_vec = match read_sites(sites, &ref_config.contigs) {
                 Ok(v) => v,
                 Err(e) => {
                     error!("Error reading sites: {}", e);
                     return;
                 }
             };
-            filter_repeat_sites(&mut s_vec, &r_vec);
+            filter_repeat_sites(&mut s_vec, &r_vec, &ref_config.contigs);
             let t_vec = match read_bed(targets) {
                 Ok(v) => v,
                 Err(e) => {
@@ -917,14 +981,6 @@ fn main() {
                 }
             };
 
-            // Load reference config
-            let ref_config = match ReferenceConfig::load(reference) {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("Error loading reference config {}: {}", reference, e);
-                    return;
-                }
-            };
 
             // Load ITD config from pipeline config's itd section
             let itd_cfg = pipeline_config.genes.itd.clone();
@@ -1148,7 +1204,7 @@ fn main() {
             // Use the BAM paths resolved at pipeline start.
             let src_bams: Vec<String> = br.resolved_paths().to_vec();
             if let Err(e) = nasvar::var::slice::dump_variant_slice(
-                &unified, &src_bams, &src_indices, Some(fasta), gff, Some(&t_vec), out_prefix,
+                &unified, &src_bams, &src_indices, Some(fasta), gff, Some(&t_vec), out_prefix, &br.contigs,
             ) {
                 warn!("[slice] dump failed: {}", e);
             }
@@ -1162,6 +1218,7 @@ fn main() {
         }
 
         Commands::Itd {
+            reference,
             bam,
             ref_fasta,
             itd_config,
@@ -1173,6 +1230,11 @@ fn main() {
                 return;
             }
 
+            let ref_config = match ReferenceConfig::load(reference) {
+                Ok(c) => c,
+                Err(e) => { error!("Error loading reference config {}: {}", reference, e); return; }
+            };
+
             let itd_cfg = match itd::load_itd_config(itd_config) {
                 Ok(c) => c,
                 Err(e) => {
@@ -1181,7 +1243,7 @@ fn main() {
                 }
             };
 
-            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref()) {
+            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref(), &ref_config.contigs) {
                 Ok(b) => b,
                 Err(e) => {
                     error!("Error opening alignment file: {}", e);
@@ -1204,6 +1266,7 @@ fn main() {
         }
 
         Commands::Breakpoints {
+            reference,
             bam,
             ref_fasta,
             out_prefix,
@@ -1216,6 +1279,11 @@ fn main() {
                 error!("{}", e);
                 return;
             }
+
+            let ref_config = match ReferenceConfig::load(reference) {
+                Ok(c) => c,
+                Err(e) => { error!("Error loading reference config {}: {}", reference, e); return; }
+            };
 
             // Load existing unified output to get fusion results
             let unified_path = format!("{}.result.json", out_prefix);
@@ -1246,7 +1314,7 @@ fn main() {
                 return;
             }
 
-            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref()) {
+            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref(), &ref_config.contigs) {
                 Ok(b) => b,
                 Err(e) => {
                     error!("Error opening alignment file: {}", e);
@@ -1288,6 +1356,7 @@ fn main() {
         }
 
         Commands::FocalDepth {
+            reference,
             bam,
             ref_fasta,
             out_prefix,
@@ -1298,13 +1367,18 @@ fn main() {
                 Err(e) => { error!("Error loading config {}: {}", config, e); return; }
             };
 
+            let ref_config = match ReferenceConfig::load(reference) {
+                Ok(c) => c,
+                Err(e) => { error!("Error loading reference config {}: {}", reference, e); return; }
+            };
+
             let plots = &pipeline_config.focal_depth.plots;
             if plots.is_empty() {
                 warn!("No focal_depth plots defined in config.");
                 return;
             }
 
-            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref()) {
+            let mut br = match get_alignment_reader(bam, ref_fasta.as_deref(), &ref_config.contigs) {
                 Ok(b) => b,
                 Err(e) => { error!("Error opening BAM: {}", e); return; }
             };

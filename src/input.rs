@@ -22,6 +22,7 @@ pub use noodles::sam;
 use noodles::core::Region;
 
 use crate::bam::ContigMapper;
+use crate::config::Contig;
 
 pub use noodles::sam::alignment::record::cigar::op::Kind as CigarKind;
 
@@ -677,6 +678,9 @@ pub struct AlignmentInput {
     sam_header: sam::Header,
     pub header: AlignmentHeader,
     pub contig_mapper: ContigMapper,
+    /// Canonical contig list (from the reference config) this input was opened with.
+    /// Lets downstream phases build assembly-correct mappers without re-plumbing config.
+    pub contigs: Vec<Contig>,
     pub start_pos: u64,
     /// Original path passed to open() (list file or single BAM)
     input_path: String,
@@ -696,21 +700,21 @@ impl AlignmentInput {
     /// If `path` ends in `.txt` or `.list`, it is treated as a file-of-filenames
     /// containing one BAM/CRAM path per line. All files must have identical
     /// reference sequences.
-    pub fn open(path: &str, ref_path: Option<&str>) -> Result<Self> {
+    pub fn open(path: &str, ref_path: Option<&str>, contigs: &[Contig]) -> Result<Self> {
         if path.ends_with(".txt") || path.ends_with(".list") {
-            Self::open_multi(path, ref_path)
+            Self::open_multi(path, ref_path, contigs)
         } else {
-            Self::open_single(path, ref_path)
+            Self::open_single(path, ref_path, contigs)
         }
     }
 
     /// Open a single alignment file.
-    fn open_single(path: &str, ref_path: Option<&str>) -> Result<Self> {
+    fn open_single(path: &str, ref_path: Option<&str>, contigs: &[Contig]) -> Result<Self> {
         let fasta_repo = Self::build_fasta_repo(ref_path)?;
 
         let (reader_state, sam_header, header) = Self::open_any_reader(path, fasta_repo)?;
 
-        let contig_mapper = ContigMapper::from_refs(&header.refs);
+        let contig_mapper = ContigMapper::from_contigs_and_refs(contigs, &header.refs);
 
         Ok(AlignmentInput {
             readers: vec![reader_state],
@@ -718,6 +722,7 @@ impl AlignmentInput {
             sam_header,
             header,
             contig_mapper,
+            contigs: contigs.to_vec(),
             start_pos: 0,
             input_path: path.to_string(),
             resolved_paths: vec![path.to_string()],
@@ -726,7 +731,7 @@ impl AlignmentInput {
     }
 
     /// Open multiple alignment files from a file-of-filenames.
-    fn open_multi(list_path: &str, ref_path: Option<&str>) -> Result<Self> {
+    fn open_multi(list_path: &str, ref_path: Option<&str>, contigs: &[Contig]) -> Result<Self> {
         let content = std::fs::read_to_string(list_path)
             .map_err(|e| anyhow::anyhow!("Failed to read file list '{}': {}", list_path, e))?;
 
@@ -754,7 +759,7 @@ impl AlignmentInput {
             readers.push(reader_state);
         }
 
-        let contig_mapper = ContigMapper::from_refs(&canonical_header.refs);
+        let contig_mapper = ContigMapper::from_contigs_and_refs(contigs, &canonical_header.refs);
 
         info!("Multi-BAM: opened {} files from {}", readers.len(), list_path);
 
@@ -766,6 +771,7 @@ impl AlignmentInput {
             sam_header,
             header: canonical_header,
             contig_mapper,
+            contigs: contigs.to_vec(),
             start_pos: 0,
             input_path: list_path.to_string(),
             resolved_paths,

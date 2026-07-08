@@ -39,6 +39,7 @@ use noodles::sam::header::record::value::{
     Map,
 };
 
+use crate::config::Contig;
 use crate::output::{FusionBreakpoint, GeneInfo, UnifiedOutput};
 use crate::utils::annotation::{GeneBounds, PartnerGeneIndex};
 use crate::utils::bed::BedRegion;
@@ -308,6 +309,7 @@ pub fn write_slice_bam(
     src_indices: &[Option<bam::bai::Index>],
     regions: &[(String, u32, u32)],
     out_bam: &str,
+    contigs: &[Contig],
 ) -> Result<usize> {
     if regions.is_empty() {
         info!("[slice] no regions of interest — skipping slice BAM");
@@ -365,7 +367,7 @@ pub fn write_slice_bam(
         .iter()
         .map(|(name, _)| String::from_utf8_lossy(name.as_ref()).to_string())
         .collect();
-    let contig_mapper = crate::bam::ContigMapper::from_refs(&bam_refs);
+    let contig_mapper = crate::bam::ContigMapper::from_contigs_and_refs(contigs, &bam_refs);
 
     // Sink: BAM writer over a bgzf writer.
     let out_file = File::create(out_bam)
@@ -518,6 +520,7 @@ pub fn dump_variant_slice(
     gff_path: &str,
     fusion_targets: Option<&[BedRegion]>,
     out_prefix: &str,
+    contigs: &[Contig],
 ) -> Result<Option<(String, String)>> {
     let regions = compute_slice_regions(
         unified, gff_path, fusion_targets,
@@ -532,13 +535,13 @@ pub fn dump_variant_slice(
     info!("[slice] {} merged regions, total span {} bp", regions.len(), total_bp);
 
     let bam_out = format!("{}.slice.bam", out_prefix);
-    write_slice_bam(src_bams, src_indices, &regions, &bam_out)?;
+    write_slice_bam(src_bams, src_indices, &regions, &bam_out, contigs)?;
     let bai_out = format!("{}.bai", bam_out);
 
     // Best-effort: a slice FASTA is useful but not load-bearing for the BAM.
     if let Some(rp) = ref_path {
         let fa_out = format!("{}.slice.fa.gz", out_prefix);
-        if let Err(e) = write_slice_fasta(&regions, rp, &fa_out) {
+        if let Err(e) = write_slice_fasta(&regions, rp, &fa_out, contigs) {
             warn!("[slice] fasta dump failed: {}", e);
         }
     }
@@ -559,6 +562,7 @@ pub fn write_slice_fasta(
     regions: &[(String, u32, u32)],
     ref_path: &str,
     out_fa: &str,
+    contigs: &[Contig],
 ) -> Result<usize> {
     use noodles::fasta;
     use flate2::write::GzEncoder;
@@ -573,7 +577,7 @@ pub fn write_slice_fasta(
     // regions carry BAM-style names (chr1, chr2). Build a mapper from the
     // reference's .fai so we can translate BAM → FASTA when querying.
     let fai_path = format!("{}.fai", ref_path);
-    let fasta_mapper = ContigMapper::from_fai(&fai_path).ok();
+    let fasta_mapper = ContigMapper::from_fai(&fai_path, contigs).ok();
 
     let mut reader = fasta::io::indexed_reader::Builder::default()
         .build_from_path(ref_path)

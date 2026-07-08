@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 
 use crate::bam::{ContigMapper, AlignmentCoords, fix_sam_coords};
 use crate::input::AlignmentInput;
-use crate::config::{PipelineConfig, ReferenceConfig};
+use crate::config::{Contig, PipelineConfig, ReferenceConfig};
 use crate::output::{CnvOutput, CnvGeneResult, KaryotypeOutput, StructuralVariant};
 use crate::utils::bed::BedRegion;
 use log::{info, warn, debug};
@@ -268,6 +268,7 @@ fn calculate_focal_depths(
 fn calculate_local_depths_raw(
     covg_path: &str,
     targets: &[BedRegion],
+    contigs: &[Contig],
 ) -> Result<(HashMap<String, f64>, f64), Box<dyn std::error::Error>> {
     // Read coverage TSV: chrom start end value
     let file = File::open(covg_path).map_err(|e| {
@@ -306,7 +307,7 @@ fn calculate_local_depths_raw(
         median
     );
 
-    let chr_mapper = ContigMapper::new();
+    let chr_mapper = ContigMapper::from_contigs(contigs);
     for t in targets {
         let mut sum_val = 0.0;
         let mut count = 0;
@@ -348,7 +349,7 @@ pub fn call_cnvs(
 {
     let CnvCallParams { coverage_file, blast_ratio, karyotype, ref_config, precomputed_focal_depths } = params;
     let mut result: HashMap<String, CnvGeneResult> = HashMap::new();
-    let chr_mapper = ContigMapper::new();
+    let chr_mapper = ContigMapper::from_contigs(&ref_config.contigs);
 
     // Map targets by name
     let mut t_map: HashMap<&str, &BedRegion> = HashMap::new();
@@ -468,7 +469,7 @@ pub fn call_cnvs(
     // 2. Calculate Local (Bin) Depths - get raw depths
     let (local_depths_raw, fallback_median) = if let Some(cov_path) = coverage_file {
         info!("Reading local depths from {}...", cov_path);
-        match calculate_local_depths_raw(cov_path, targets) {
+        match calculate_local_depths_raw(cov_path, targets, &ref_config.contigs) {
             Ok((d, m)) => (d, m),
             Err(e) => {
                 warn!("Could not read coverage file: {}", e);
@@ -558,7 +559,7 @@ pub fn call_cnvs(
     for g in &config.genes.cnv.duplication_genes {
         del_dup_genes.insert(g.as_str());
     }
-    let chr_mapper = ContigMapper::new();
+    let chr_mapper = ContigMapper::from_contigs(&ref_config.contigs);
 
     for g in del_dup_genes {
         if let Some(t) = t_map.get(g) {

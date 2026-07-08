@@ -347,6 +347,7 @@ pub struct ItdEvent {
     /// Chromosome name (from the ITD region config). Carried on the event
     /// so downstream consumers don't need the pipeline config to render a
     /// "view alignments" link.
+    #[serde(default)]
     pub chrom: String,
 
     /// Insertion position on reference

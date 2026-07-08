@@ -310,7 +310,7 @@ pub fn call_itds(
                         let fasta_chrom = fasta_path.and_then(|fp| {
                             chrom_str.as_ref().map(|chrom| {
                                 let fai_path = format!("{}.fai", fp);
-                                let mapper = ContigMapper::from_fai(&fai_path)
+                                let mapper = ContigMapper::from_fai(&fai_path, &bam.contigs)
                                     .unwrap_or_else(|_| bam.contig_mapper.clone());
                                 mapper.to_bam_name(chrom)
                             })

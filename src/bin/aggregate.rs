@@ -12,8 +12,6 @@ use nasvar::utils::contig::ContigMapper;
 #[command(name = "aggregate")]
 #[command(about = "Make aggregate report (TSV) from analysis output directories")]
 struct Cli {
-    /// Analysis version (string)
-    version: String,
     /// Path to aggregate configuration file (JSON). If not provided, uses defaults.
     #[arg(long)]
     config: Option<String>,
@@ -115,8 +113,10 @@ fn process_directory(
     result.insert("fusions".to_string(), String::new());
     result.insert("one_sided_fusions".to_string(), String::new());
 
-    // Create mapper for chromosome name conversion
-    let mapper = ContigMapper::new();
+    // Aggregation runs over already-produced per-sample results whose chrom
+    // fields are written in chr-name form, so an identity mapper suffices for
+    // display normalization here (no reference config is required by this tool).
+    let mapper = ContigMapper::default();
 
     // Find and load result.json
     let unified_path = match find_file_with_suffix(run_dir, &["result.json"]) {
@@ -140,6 +140,8 @@ fn process_directory(
             return None;
         }
     };
+
+    result.insert("nasvar_version".to_string(), unified.version.clone());
 
     // ----------------------- Fusions ----------------------------
     if let Some(ref fusions_data) = unified.fusions {
@@ -413,11 +415,21 @@ fn process_directory(
 /// Build output columns from config gene lists
 fn build_columns(config: &AggregateConfig) -> Vec<String> {
     if !config.columns.is_empty() {
-        return config.columns.clone();
+        let mut cols = config.columns.clone();
+        if !cols.iter().any(|c| c == "nasvar_version") {
+            let insert_at = cols
+                .iter()
+                .position(|c| c == "name")
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            cols.insert(insert_at, "nasvar_version".into());
+        }
+        return cols;
     }
 
     let mut cols: Vec<String> = vec![
         "name".into(),
+        "nasvar_version".into(),
         "karyotype".into(),
         "ISCN".into(),
         "warnings".into(),

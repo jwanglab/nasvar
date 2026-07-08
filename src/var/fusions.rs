@@ -3,7 +3,7 @@ use std::io::Write;
 
 use crate::bam::{ContigMapper, AlignmentCoords, fix_sam_coords};
 use crate::input::{AlignmentInput, AlignmentHeader, AlignmentRecord, CigarKind};
-use crate::config::PipelineConfig;
+use crate::config::{Contig, PipelineConfig};
 use crate::utils::bed::BedRegion;
 use crate::utils::annotation::PartnerGeneIndex;
 use log::info;
@@ -35,11 +35,12 @@ impl FusionAccumulator {
         header: &AlignmentHeader,
         targets: &[BedRegion],
         config: &PipelineConfig,
+        contigs: &[Contig],
     ) -> Self {
         let mut target_map: HashMap<usize, Vec<BedRegion>> = HashMap::new();
         let mut margins: HashMap<String, u32> = HashMap::new();
 
-        let mapper = ContigMapper::from_refs(&header.refs);
+        let mapper = ContigMapper::from_contigs_and_refs(contigs, &header.refs);
 
         for t in targets {
             let bam_chrom = mapper.to_bam_name(&t.segment);
@@ -147,7 +148,7 @@ pub fn call_fusions(
     let file_blocks = bam.total_file_blocks();
 
     // Create accumulator (uses shared code for both CLI and pipeline)
-    let mut accumulator = FusionAccumulator::new(&bam.header, targets, config);
+    let mut accumulator = FusionAccumulator::new(&bam.header, targets, config, &bam.contigs);
 
     // Pass 1: Scan BAM with progress reporting
     bam.seek(bam.start_pos)?;
@@ -205,7 +206,7 @@ pub fn call_fusions_from_hits(
     let file_blocks = bam.total_file_blocks();
 
     // Create a ContigMapper to translate BED chromosome names to BAM chromosome names
-    let mapper = ContigMapper::from_refs(&bam.header.refs);
+    let mapper = bam.contig_mapper.clone();
 
     let mut target_ref_map: HashMap<String, Vec<&BedRegion>> = HashMap::new();
     for target in targets {
@@ -439,7 +440,7 @@ pub fn call_fusions_from_hits(
                                         // Must land near an allowed partner
                                         if let Some(index) = partner_index {
                                             let margin = config.thresholds.fusions.default_margin;
-                                            index.is_near_any_partner(partners, unknown_chrom, unknown_pos, margin)
+                                            index.is_near_any_partner(partners, unknown_chrom, unknown_pos, margin, &mapper)
                                         } else {
                                             // No partner index loaded - cannot validate partners
                                             false

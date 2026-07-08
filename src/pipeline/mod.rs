@@ -1,8 +1,7 @@
 use log::info;
 use crate::bam::ContigMapper;
-use crate::utils::contig::NUM_CHROMOSOMES;
 use crate::input::{AlignmentInput, AlignmentHeader, AlignmentRecord, CigarKind};
-use crate::config::PipelineConfig;
+use crate::config::{Contig, PipelineConfig};
 use crate::output::{OutputCollector, FusionsOutput, UnifiedOutput};
 use crate::utils::bed::BedRegion;
 use crate::utils::qc::PipelineQcData;
@@ -121,6 +120,8 @@ impl<'a> PipelineRunner<'a> {
         }
 
         let header = bam.header.clone();
+        // Canonical contig list this input was opened with (assembly-specific).
+        let contigs = bam.contigs.clone();
 
         // Initialize output collector with metadata from BAM header
         let mut collector = OutputCollector::new();
@@ -135,7 +136,7 @@ impl<'a> PipelineRunner<'a> {
         let mut cov_acc = if !use_as_for_coverage {
             if let Some(reps) = &self.coverage_repeats {
                 Some(CoverageAccumulator::new_with_gc(
-                    &header, reps, self.ref_path.as_deref(), self.gc_bins.as_ref(),
+                    &header, reps, self.ref_path.as_deref(), self.gc_bins.as_ref(), &contigs,
                 ))
             } else {
                 None
@@ -148,15 +149,15 @@ impl<'a> PipelineRunner<'a> {
         let mut maf_acc = self.maf_sites.as_ref().map(|sites| {
             let mut filtered = sites.clone();
             if let Some(regions) = &self.maf_regions {
-                filter_enriched_sites(&mut filtered, regions);
+                filter_enriched_sites(&mut filtered, regions, &contigs);
             }
-            MafAccumulator::new(&header, filtered)
+            MafAccumulator::new(&header, filtered, &contigs)
         });
 
         // Fusion accumulator requires config for per-gene margins
         let mut fusion_acc = if let Some(targets) = &self.fusion_targets {
             let config = self.config.expect("PipelineConfig required for fusion calling - use .with_config()");
-            Some(FusionAccumulator::new(&header, targets, config))
+            Some(FusionAccumulator::new(&header, targets, config, &contigs))
         } else {
             None
         };
@@ -165,7 +166,7 @@ impl<'a> PipelineRunner<'a> {
         let mut qc_acc = self
             .fusion_targets
             .as_ref()
-            .map(|targets| QcAccumulator::new(&header, targets));
+            .map(|targets| QcAccumulator::new(&header, targets, &contigs));
 
 
         // Main Loop
@@ -213,7 +214,7 @@ impl<'a> PipelineRunner<'a> {
             use crate::var::coverage::scan_as_alignments_with_gc;
             info!("Scanning adaptive sampling alignments for coverage...");
             let as_acc = scan_as_alignments_with_gc(
-                as_path, &header, reps, self.ref_path.as_deref(), self.gc_bins.as_ref(),
+                as_path, &header, reps, self.ref_path.as_deref(), self.gc_bins.as_ref(), &contigs,
             )?;
             as_acc.write_output(&format!("{}.coverage.tsv", self.out_prefix), true)?;
             Some(as_acc.reads_aligned())
@@ -344,15 +345,17 @@ pub struct MafAccumulator {
 }
 
 impl MafAccumulator {
-    pub fn new(header: &AlignmentHeader, sites_input: Vec<Vec<Site>>) -> Self {
+    pub fn new(header: &AlignmentHeader, sites_input: Vec<Vec<Site>>, contigs: &[Contig]) -> Self {
         let mut sites_by_ref = vec![Vec::new(); header.refs.len()];
         let mut counts = vec![Vec::new(); header.refs.len()];
 
-        // Map sites (indexed by canonical chromosome) to BAM ref_ids.
-        // Support both NC_* accession and chr* naming conventions.
-        for i in 0..NUM_CHROMOSOMES {
-            let acc = ContigMapper::accession_from_index(i).unwrap();
-            let chr = ContigMapper::chr_name_from_index(i).unwrap();
+        // Map sites (indexed by canonical chromosome) to BAM ref_ids using the
+        // assembly's own accession/chr names from the reference config. Support
+        // both accession (NC_*) and chr* naming conventions in the BAM header.
+        let mapper = ContigMapper::from_contigs(contigs);
+        for i in 0..mapper.num_chromosomes() {
+            let acc = mapper.accession_from_index(i).unwrap();
+            let chr = mapper.chr_name_from_index(i).unwrap();
             let ref_id = header.refs.iter().position(|r| r == acc)
                 .or_else(|| header.refs.iter().position(|r| r == chr));
             if let Some(ref_id) = ref_id
@@ -474,8 +477,8 @@ pub struct QcAccumulator {
 }
 
 impl QcAccumulator {
-    pub fn new(header: &AlignmentHeader, targets: &[BedRegion]) -> Self {
-        let mapper = ContigMapper::from_refs(&header.refs);
+    pub fn new(header: &AlignmentHeader, targets: &[BedRegion], contigs: &[Contig]) -> Self {
+        let mapper = ContigMapper::from_contigs_and_refs(contigs, &header.refs);
         let mut per_targets = Vec::with_capacity(targets.len());
         let mut by_ref: HashMap<usize, Vec<usize>> = HashMap::new();
         let mut target_regions_nt: u64 = 0;

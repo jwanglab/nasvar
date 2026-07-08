@@ -1,0 +1,56 @@
+{
+  "name": "GRCh38",
+  "contigs": [
+    { "name": "chr1",  "accession": "NC_000001.11" },
+    { "name": "chr2",  "accession": "NC_000002.12" },
+    { "name": "chr3",  "accession": "NC_000003.12" },
+    { "name": "chr4",  "accession": "NC_000004.12" },
+    { "name": "chr5",  "accession": "NC_000005.10" },
+    { "name": "chr6",  "accession": "NC_000006.12" },
+    { "name": "chr7",  "accession": "NC_000007.14" },
+    { "name": "chr8",  "accession": "NC_000008.11" },
+    { "name": "chr9",  "accession": "NC_000009.12" },
+    { "name": "chr10", "accession": "NC_000010.11" },
+    { "name": "chr11", "accession": "NC_000011.10" },
+    { "name": "chr12", "accession": "NC_000012.12" },
+    { "name": "chr13", "accession": "NC_000013.11" },
+    { "name": "chr14", "accession": "NC_000014.9" },
+    { "name": "chr15", "accession": "NC_000015.10" },
+    { "name": "chr16", "accession": "NC_000016.10" },
+    { "name": "chr17", "accession": "NC_000017.11" },
+    { "name": "chr18", "accession": "NC_000018.10" },
+    { "name": "chr19", "accession": "NC_000019.10" },
+    { "name": "chr20", "accession": "NC_000020.11" },
+    { "name": "chr21", "accession": "NC_000021.9" },
+    { "name": "chr22", "accession": "NC_000022.11" },
+    { "name": "chrX",  "accession": "NC_000023.11" },
+    { "name": "chrY",  "accession": "NC_000024.10" }
+  ],
+  "centromeres": {
+    "chr1": [122026459, 124932724],
+    "chr2": [92188145, 94090557],
+    "chr3": [90772458, 93655574],
+    "chr4": [49712061, 51743951],
+    "chr5": [46485900, 50059807],
+    "chr6": [58553888, 59829934],
+    "chr7": [58169653, 61528020],
+    "chr8": [44033744, 45877265],
+    "chr9": [43389635, 45518558],
+    "chr10": [39686682, 41593521],
+    "chr11": [51078348, 54425074],
+    "chr12": [34769407, 37185252],
+    "chr16": [36311158, 38265669],
+    "chr17": [22813679, 26616164],
+    "chr18": [15460899, 20861206],
+    "chr19": [24498980, 27190874],
+    "chr20": [26436232, 30038348]
+  },
+  "par1": {
+    "chrX": [10001, 2781479],
+    "chrY": [10001, 2781479]
+  },
+  "par2": {
+    "chrX": [155701382, 156030895],
+    "chrY": [56887902, 57217415]
+  }
+}

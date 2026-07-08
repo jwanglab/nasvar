@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 
 use crate::bam::ContigMapper;
+use crate::config::Contig;
 use crate::input::{AlignmentInput, AlignmentHeader, AlignmentRecord};
 use crate::utils::bed::BedRegion;
 use log::{info, debug, warn};
@@ -86,8 +87,8 @@ fn lookup_gc_bins(gc: &GcBinMap, mapped_name: &str, n_bins: usize) -> Vec<f32> {
 
 impl CoverageAccumulator {
     /// Create new accumulator with repeat masks and optional GC content.
-    pub fn new(header: &AlignmentHeader, repeats: &[BedRegion], ref_path: Option<&str>) -> Self {
-        Self::new_with_gc(header, repeats, ref_path, None)
+    pub fn new(header: &AlignmentHeader, repeats: &[BedRegion], ref_path: Option<&str>, contigs: &[Contig]) -> Self {
+        Self::new_with_gc(header, repeats, ref_path, None, contigs)
     }
 
     /// Like `new`, but if `gc_bins` is Some, pre-computed GC values are used
@@ -100,6 +101,7 @@ impl CoverageAccumulator {
         repeats: &[BedRegion],
         ref_path: Option<&str>,
         gc_bins: Option<&GcBinMap>,
+        contigs: &[Contig],
     ) -> Self {
         info!("Initializing coverage accumulator...");
         let bin_size = 1_000_000;
@@ -125,11 +127,11 @@ impl CoverageAccumulator {
         // Detect FASTA naming convention from the .fai index
         let fasta_mapper = ref_path.and_then(|rp| {
             let fai_path = format!("{}.fai", rp);
-            ContigMapper::from_fai(&fai_path).ok()
+            ContigMapper::from_fai(&fai_path, contigs).ok()
         });
 
         let mut chroms = Vec::with_capacity(header.refs.len());
-        let mapper = ContigMapper::new();
+        let mapper = ContigMapper::from_contigs(contigs);
 
         for (idx, (name, len)) in header.refs.iter().zip(header.lengths.iter()).enumerate() {
             let len = *len as usize;
@@ -415,14 +417,14 @@ pub fn read_depth(
 
     if let Some(as_path) = as_alignments {
         // Use adaptive sampling alignments exclusively for coverage
-        let accumulator = scan_as_alignments(as_path, &bam.header, repeats, ref_path)?;
+        let accumulator = scan_as_alignments(as_path, &bam.header, repeats, ref_path, &bam.contigs)?;
         accumulator.write_output(&out_file, include_gc)?;
         let reads_aligned = accumulator.reads_aligned();
         info!("Total aligned reads (primary, from AS): {}", reads_aligned);
         Ok(reads_aligned)
     } else {
         // Standard: scan main BAM for coverage
-        let mut accumulator = CoverageAccumulator::new(&bam.header, repeats, ref_path);
+        let mut accumulator = CoverageAccumulator::new(&bam.header, repeats, ref_path, &bam.contigs);
         bam.seek(bam.start_pos)?;
         while let Some(record) = bam.read_record()? {
             accumulator.process(&record);
@@ -445,9 +447,10 @@ pub fn scan_as_alignments(
     bam_header: &AlignmentHeader,
     repeats: &[BedRegion],
     ref_path: Option<&str>,
+    contigs: &[Contig],
 ) -> Result<CoverageAccumulator, Box<dyn std::error::Error>>
 {
-    scan_as_alignments_with_gc(path, bam_header, repeats, ref_path, None)
+    scan_as_alignments_with_gc(path, bam_header, repeats, ref_path, None, contigs)
 }
 
 pub fn scan_as_alignments_with_gc(
@@ -456,16 +459,17 @@ pub fn scan_as_alignments_with_gc(
     repeats: &[BedRegion],
     ref_path: Option<&str>,
     gc_bins: Option<&GcBinMap>,
+    contigs: &[Contig],
 ) -> Result<CoverageAccumulator, Box<dyn std::error::Error>>
 {
     info!("Scanning adaptive sampling alignments: {}", path);
 
-    let mut input = AlignmentInput::open(path, None)?;
+    let mut input = AlignmentInput::open(path, None, contigs)?;
 
     // Validate reference sequences match the primary input
     AlignmentInput::validate_headers_match(bam_header, &input.header, path)?;
 
-    let mut accumulator = CoverageAccumulator::new_with_gc(bam_header, repeats, ref_path, gc_bins);
+    let mut accumulator = CoverageAccumulator::new_with_gc(bam_header, repeats, ref_path, gc_bins, contigs);
 
     let mut count = 0u64;
     while let Some(record) = input.read_record()? {

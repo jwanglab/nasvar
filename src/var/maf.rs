@@ -1,6 +1,7 @@
+use crate::config::Contig;
 use crate::input::{AlignmentInput, CigarKind};
 use crate::utils::bed::BedRegion;
-use crate::utils::contig::{ContigMapper, NUM_CHROMOSOMES};
+use crate::utils::contig::ContigMapper;
 use log::debug;
 use std::collections::HashMap;
 use std::fs::File;
@@ -13,8 +14,9 @@ pub struct Site {
     pub al1: u8,
 }
 
-pub fn read_sites(path: &str) -> Result<Vec<Vec<Site>>, Box<dyn std::error::Error>> {
-    let mut sites = vec![Vec::new(); NUM_CHROMOSOMES];
+pub fn read_sites(path: &str, contigs: &[Contig]) -> Result<Vec<Vec<Site>>, Box<dyn std::error::Error>> {
+    let mapper = ContigMapper::from_contigs(contigs);
+    let mut sites = vec![Vec::new(); mapper.num_chromosomes()];
     let file = File::open(path).map_err(|e| {
         std::io::Error::other(format!("Error opening sites file {}: {}", path, e))
     })?;
@@ -27,7 +29,7 @@ pub fn read_sites(path: &str) -> Result<Vec<Vec<Site>>, Box<dyn std::error::Erro
             continue;
         }
 
-        let idx = match ContigMapper::parse_chr_index(p[0]) {
+        let idx = match mapper.parse_chr_index(p[0]) {
             Some(i) => i,
             None => continue,
         };
@@ -62,12 +64,13 @@ pub fn read_sites(path: &str) -> Result<Vec<Vec<Site>>, Box<dyn std::error::Erro
 }
 
 /// Keep only sites that fall within enriched BED regions.
-pub fn filter_enriched_sites(sites: &mut [Vec<Site>], enriched: &[BedRegion]) {
-    let mapper = ContigMapper::new();
+pub fn filter_enriched_sites(sites: &mut [Vec<Site>], enriched: &[BedRegion], contigs: &[Contig]) {
+    let mapper = ContigMapper::from_contigs(contigs);
+    let n = mapper.num_chromosomes();
 
-    let mut enriched_by_chr: Vec<Vec<(usize, usize)>> = vec![Vec::new(); NUM_CHROMOSOMES];
+    let mut enriched_by_chr: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
     for r in enriched {
-        if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < NUM_CHROMOSOMES {
+        if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < n {
             enriched_by_chr[idx].push((r.start as usize, r.end as usize));
         }
     }
@@ -76,7 +79,7 @@ pub fn filter_enriched_sites(sites: &mut [Vec<Site>], enriched: &[BedRegion]) {
     }
 
     for (chr_idx, chr_sites) in sites.iter_mut().enumerate() {
-        if chr_idx >= NUM_CHROMOSOMES { break; }
+        if chr_idx >= n { break; }
         let intervals = &enriched_by_chr[chr_idx];
         if intervals.is_empty() {
             chr_sites.clear();
@@ -94,13 +97,14 @@ pub fn filter_enriched_sites(sites: &mut [Vec<Site>], enriched: &[BedRegion]) {
 }
 
 /// Remove sites that fall within repeat/masked BED regions.
-pub fn filter_repeat_sites(sites: &mut [Vec<Site>], repeats: &[BedRegion]) {
-    let mapper = ContigMapper::new();
+pub fn filter_repeat_sites(sites: &mut [Vec<Site>], repeats: &[BedRegion], contigs: &[Contig]) {
+    let mapper = ContigMapper::from_contigs(contigs);
+    let n = mapper.num_chromosomes();
 
     // Group repeat intervals by chromosome index, sorted by start
-    let mut repeats_by_chr: Vec<Vec<(usize, usize)>> = vec![Vec::new(); NUM_CHROMOSOMES];
+    let mut repeats_by_chr: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n];
     for r in repeats {
-        if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < NUM_CHROMOSOMES {
+        if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < n {
             repeats_by_chr[idx].push((r.start as usize, r.end as usize));
         }
     }
@@ -109,7 +113,7 @@ pub fn filter_repeat_sites(sites: &mut [Vec<Site>], repeats: &[BedRegion]) {
     }
 
     for (chr_idx, chr_sites) in sites.iter_mut().enumerate() {
-        if chr_idx >= NUM_CHROMOSOMES { break; }
+        if chr_idx >= n { break; }
         let intervals = &repeats_by_chr[chr_idx];
         if intervals.is_empty() { continue; }
         chr_sites.retain(|site| {

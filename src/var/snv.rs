@@ -142,7 +142,7 @@ pub fn call_snvs(
 
     // Detect FASTA naming convention (may differ from BAM)
     let fai_path = format!("{}.fai", fasta_path);
-    let fasta_mapper = ContigMapper::from_fai(&fai_path).unwrap_or_else(|_| {
+    let fasta_mapper = ContigMapper::from_fai(&fai_path, &bam.contigs).unwrap_or_else(|_| {
         warn!("Could not read FASTA index {}, assuming FASTA matches BAM naming", fai_path);
         bam.contig_mapper.clone()
     });
@@ -175,7 +175,13 @@ pub fn call_snvs(
             warn!("Gene {} not found in configuration.", gene);
         }
 
-        let ann = get_gene_annotation(&gene, gff_path, target_transcript)?;
+        let ann = match get_gene_annotation(&gene, gff_path, target_transcript) {
+            Ok(ann) => ann,
+            Err(e) => {
+                warn!("Skipping SNV gene {}: {}", gene, e);
+                continue;
+            }
+        };
         let mrna_id = ann.mrna_id;
         let chrom = ann.chrom_bytes;
         let gene_strand = ann.strand;

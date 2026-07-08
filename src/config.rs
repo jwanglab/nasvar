@@ -13,10 +13,24 @@ use std::io::BufReader;
 // Reference Genome Configuration
 // ============================================================================
 
-/// Reference genome data including centromeres and PAR regions
+/// A single canonical chromosome: its display name and its accession in this assembly.
+/// The order of `contigs` in the reference config defines the canonical chromosome
+/// index (0-based) used throughout the pipeline (karyotype, MAF, coverage).
+#[derive(Deserialize, Debug, Clone)]
+pub struct Contig {
+    /// Display name, e.g. "chr1"
+    pub name: String,
+    /// Accession in this assembly, e.g. "NC_000001.11"
+    pub accession: String,
+}
+
+/// Reference genome data including contig naming, centromeres and PAR regions
 #[derive(Deserialize, Debug, Clone)]
 pub struct ReferenceConfig {
     pub name: String,
+    /// Ordered canonical chromosomes (chr1..chr22, chrX, chrY): name <-> accession.
+    /// Position in this list is the canonical chromosome index.
+    pub contigs: Vec<Contig>,
     pub centromeres: HashMap<String, (u32, u32)>,
     pub par1: HashMap<String, (u32, u32)>,
     pub par2: HashMap<String, (u32, u32)>,

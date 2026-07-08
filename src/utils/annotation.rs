@@ -32,6 +32,25 @@ fn get_gff_attribute_values<'a>(info: &'a str, key: &str) -> Vec<&'a str> {
     Vec::new()
 }
 
+/// Best-effort human-readable transcript accession for an mRNA feature line.
+/// Prefers `Name`, then `transcript_id`, then a `Genbank:` entry in `Dbxref`.
+/// Used only to make "transcript not found" errors actionable when the feature
+/// `ID` is opaque (e.g. `rna8`) and the accession lives elsewhere.
+fn transcript_accession(info: &str) -> Option<String> {
+    for key in ["Name", "transcript_id"] {
+        if let Some(v) = get_gff_attribute_values(info, key).first()
+            && !v.is_empty() {
+                return Some((*v).to_string());
+            }
+    }
+    for x in get_gff_attribute_values(info, "Dbxref") {
+        if let Some(acc) = x.strip_prefix("Genbank:").or_else(|| x.strip_prefix("GenBank:")) {
+            return Some(acc.to_string());
+        }
+    }
+    None
+}
+
 /// Parsed gene annotation from a GFF file.
 pub struct GeneAnnotation {
     pub gene_id: String,
@@ -102,6 +121,8 @@ pub fn get_gene_annotation_from_reader<R: BufRead>(gene_name: &str, reader: R, t
 
     // Find ALL mRNA children of gene_id
     let mut candidate_transcripts: Vec<String> = Vec::new();
+    // Feature ID -> best-effort accession (Name/transcript_id/Dbxref), for error messages
+    let mut candidate_accessions: HashMap<String, String> = HashMap::new();
 
     for line in &relevant_lines {
         let parts: Vec<&str> = line.split('\t').collect();
@@ -115,7 +136,11 @@ pub fn get_gene_annotation_from_reader<R: BufRead>(gene_name: &str, reader: R, t
                  for tag in info.split(';') {
                     let tag = tag.trim();
                     if let Some(stripped) = tag.strip_prefix("ID=") {
-                         candidate_transcripts.push(stripped.to_string());
+                         let id = stripped.to_string();
+                         if let Some(acc) = transcript_accession(info) {
+                             candidate_accessions.insert(id.clone(), acc);
+                         }
+                         candidate_transcripts.push(id);
                          break;
                     }
                  }
@@ -162,12 +187,26 @@ pub fn get_gene_annotation_from_reader<R: BufRead>(gene_name: &str, reader: R, t
               best_mrna = target.to_string();
               cds_list = transcript_cds.get(target).unwrap().clone();
          } else {
-             // Fallback or Error?
-             // Let's error if specific ID requested but not found (under this gene).
-             // However, maybe it wasn't a child of this gene ID?
-             // The loop above only finding children of 'gene_id'.
-             // If user provides a transcript ID, it MUST be a child of the gene name provided.
-             return Err(format!("Transcript {} not found for gene {}", target, gene_name).into());
+             // Requested transcript is not one of this gene's mRNA feature IDs.
+             // List what IS available (with accessions) so the mismatch is actionable:
+             // config values like `rna-NM_004119.3` won't match GFFs whose mRNA IDs
+             // are opaque (e.g. `rna8`) with the accession in Name/transcript_id.
+             let mut available: Vec<String> = candidate_transcripts
+                 .iter()
+                 .map(|id| match candidate_accessions.get(id) {
+                     Some(acc) => format!("    - {}  ({})", id, acc),
+                     None => format!("    - {}", id),
+                 })
+                 .collect();
+             available.sort();
+             return Err(format!(
+                 "Transcript '{}' not found for gene {}.\n  \
+                  Available transcripts (feature ID -> accession):\n{}\n  \
+                  Hint: the config 'transcript' must equal a feature ID listed above. \
+                  Some NCBI GFFs store the RefSeq accession in Name/transcript_id rather \
+                  than the feature ID, and may annotate a different version.",
+                 target, gene_name, available.join("\n")
+             ).into());
          }
     } else {
         // Default to first if none have CDS
@@ -288,9 +327,8 @@ impl PartnerGeneIndex {
 
     /// Check if a breakpoint falls within margin of a specific gene.
     /// Normalizes chromosome names to handle NC_* vs chr* mismatches.
-    pub fn is_near_gene(&self, gene_name: &str, chrom: &str, pos: u32, margin: u32) -> bool {
+    pub fn is_near_gene(&self, gene_name: &str, chrom: &str, pos: u32, margin: u32, mapper: &crate::bam::ContigMapper) -> bool {
         if let Some(bounds) = self.genes.get(gene_name) {
-            let mapper = crate::bam::ContigMapper::new();
             let norm_chrom = mapper.to_chr_name(chrom);
             let norm_bounds_chrom = mapper.to_chr_name(&bounds.chrom);
             if norm_chrom == norm_bounds_chrom {
@@ -303,8 +341,8 @@ impl PartnerGeneIndex {
     }
 
     /// Check if a breakpoint falls within margin of ANY of the provided partner genes
-    pub fn is_near_any_partner(&self, partners: &[String], chrom: &str, pos: u32, margin: u32) -> bool {
-        partners.iter().any(|p| self.is_near_gene(p, chrom, pos, margin))
+    pub fn is_near_any_partner(&self, partners: &[String], chrom: &str, pos: u32, margin: u32, mapper: &crate::bam::ContigMapper) -> bool {
+        partners.iter().any(|p| self.is_near_gene(p, chrom, pos, margin, mapper))
     }
 
     /// Get gene coordinates if present
@@ -384,6 +422,26 @@ mod tests {
     }
 
     #[test]
+    fn test_transcript_not_found_lists_candidates() {
+        // Old-style NCBI GFF: opaque mRNA feature ID, accession in Name/transcript_id,
+        // and a different version than the requested transcript.
+        let gff_data = "chr13\t.\tgene\t1000\t5000\t.\t-\t.\tID=gene99;Name=FLT3\n\
+                        chr13\t.\tmRNA\t1000\t5000\t.\t-\t.\tID=rna8;Parent=gene99;Name=NM_004119.2;transcript_id=NM_004119.2\n\
+                        chr13\t.\tCDS\t1100\t1200\t.\t-\t0\tID=cds1;Parent=rna8\n";
+
+        let cursor = Cursor::new(gff_data);
+        let msg = match get_gene_annotation_from_reader("FLT3", cursor, Some("rna-NM_004119.3")) {
+            Ok(_) => panic!("expected an error for an unmatched transcript"),
+            Err(e) => e.to_string(),
+        };
+
+        // Message names the requested transcript, the available feature ID, and its accession.
+        assert!(msg.contains("rna-NM_004119.3"), "should echo requested id: {}", msg);
+        assert!(msg.contains("rna8"), "should list candidate feature ID: {}", msg);
+        assert!(msg.contains("NM_004119.2"), "should list candidate accession: {}", msg);
+    }
+
+    #[test]
     fn test_partner_gene_index() {
         let gff_data = "chr1\t.\tgene\t1000\t2000\t.\t+\t.\tID=gene1;Name=GATA2\n\
                         chr1\t.\tgene\t5000\t6000\t.\t+\t.\tID=gene2;Name=ETV6\n\
@@ -398,18 +456,21 @@ mod tests {
         // Should have loaded 3 genes (UNKNOWN not in GFF)
         assert_eq!(index.len(), 3);
 
+        // An identity mapper is sufficient here (chrom names already normalized).
+        let mapper = crate::bam::ContigMapper::default();
+
         // Test is_near_gene
-        assert!(index.is_near_gene("GATA2", "chr1", 1500, 100));  // Inside gene
-        assert!(index.is_near_gene("GATA2", "chr1", 900, 200));   // Within margin before
-        assert!(index.is_near_gene("GATA2", "chr1", 2100, 200));  // Within margin after
-        assert!(!index.is_near_gene("GATA2", "chr1", 3000, 100)); // Outside margin
-        assert!(!index.is_near_gene("GATA2", "chr2", 1500, 100)); // Wrong chromosome
+        assert!(index.is_near_gene("GATA2", "chr1", 1500, 100, &mapper));  // Inside gene
+        assert!(index.is_near_gene("GATA2", "chr1", 900, 200, &mapper));   // Within margin before
+        assert!(index.is_near_gene("GATA2", "chr1", 2100, 200, &mapper));  // Within margin after
+        assert!(!index.is_near_gene("GATA2", "chr1", 3000, 100, &mapper)); // Outside margin
+        assert!(!index.is_near_gene("GATA2", "chr2", 1500, 100, &mapper)); // Wrong chromosome
 
         // Test is_near_any_partner
         let partners = vec!["GATA2".to_string(), "ETV6".to_string()];
-        assert!(index.is_near_any_partner(&partners, "chr1", 1500, 100));  // Near GATA2
-        assert!(index.is_near_any_partner(&partners, "chr1", 5500, 100));  // Near ETV6
-        assert!(!index.is_near_any_partner(&partners, "chr2", 15000, 100)); // Near RUNX1 but not in partners list
+        assert!(index.is_near_any_partner(&partners, "chr1", 1500, 100, &mapper));  // Near GATA2
+        assert!(index.is_near_any_partner(&partners, "chr1", 5500, 100, &mapper));  // Near ETV6
+        assert!(!index.is_near_any_partner(&partners, "chr2", 15000, 100, &mapper)); // Near RUNX1 but not in partners list
 
         // Test get_gene
         let gata2 = index.get_gene("GATA2").unwrap();

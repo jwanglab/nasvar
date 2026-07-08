@@ -2,7 +2,6 @@ mod plot;
 
 use log::{info, warn, debug};
 use crate::bam::ContigMapper;
-use crate::utils::contig::NUM_CHROMOSOMES;
 use crate::config::{KaryotypeThresholds, ReferenceConfig};
 use crate::output::KaryotypeOutput;
 use crate::var::maf::Site;
@@ -43,7 +42,7 @@ pub struct CoverageBin {
 
 fn get_segment(chrom: &str, start: u32, end: u32, ref_config: &ReferenceConfig) -> Option<String> {
     // Use ContigMapper to normalize accession IDs to chr names
-    let mapper = ContigMapper::new();
+    let mapper = ContigMapper::from_contigs(&ref_config.contigs);
     let normalized_chrom = mapper.to_chr_name(chrom);
 
     if !normalized_chrom.starts_with("chr") {
@@ -438,13 +437,14 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_dept
     let reader = BufReader::new(file);
     let mut bafs: HashMap<String, Vec<Option<f64>>> = HashMap::new();
     let min_depth_f = min_depth as f64;
-    let mapper = ContigMapper::new();
+    let mapper = ContigMapper::from_contigs(&ref_config.contigs);
+    let n_chr = mapper.num_chromosomes();
 
     // Build per-chromosome sorted interval lookup from enriched regions
     let enriched_by_chr: Option<Vec<Vec<(u32, u32)>>> = enriched.map(|regions| {
-        let mut by_chr: Vec<Vec<(u32, u32)>> = vec![Vec::new(); NUM_CHROMOSOMES];
+        let mut by_chr: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_chr];
         for r in regions {
-            if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < NUM_CHROMOSOMES {
+            if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < n_chr {
                 by_chr[idx].push((r.start, r.end));
             }
         }
@@ -453,6 +453,18 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_dept
         }
         by_chr
     });
+
+    // Build per-chr-index interval lookup for enriched filter (if provided)
+    let bed_by_idx: Option<Vec<Vec<(u32, u32)>>> = enriched.map(|regions| {
+        let mut by_idx: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_chr];
+        for r in regions {
+            if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < n_chr {
+                by_idx[idx].push((r.start, r.end));
+            }
+        }
+        by_idx
+    });
+    let mut filtered_off_target: u64 = 0;
 
     for line in reader.lines() {
         let l = line?;
@@ -472,7 +484,7 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_dept
         // Skip sites outside enriched regions when a filter is provided
         if let Some(ref by_chr) = enriched_by_chr {
             let in_region = mapper.get_chr_index(chrom)
-                .filter(|&idx| idx < NUM_CHROMOSOMES)
+                .filter(|&idx| idx < n_chr)
                 .map(|idx| {
                     let intervals = &by_chr[idx];
                     let i = intervals.partition_point(|&(start, _)| start <= pos);
@@ -494,6 +506,9 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_dept
         if let Some(segment) = get_segment_from_pos(chrom, pos, ref_config) {
             bafs.entry(segment).or_default().push(value);
         }
+    }
+    if filtered_off_target > 0 {
+        info!("BAF plot: dropped {} MAF sites outside enriched regions", filtered_off_target);
     }
     Ok(bafs)
 }
@@ -851,12 +866,13 @@ pub fn compute_seg_bases(
     enriched: &[BedRegion],
     ref_config: &ReferenceConfig,
 ) -> HashMap<String, usize> {
-    let mapper = ContigMapper::new();
+    let mapper = ContigMapper::from_contigs(&ref_config.contigs);
+    let n_chr = mapper.num_chromosomes();
 
     // Group enriched intervals by chromosome index
-    let mut bed_by_idx: Vec<Vec<(u32, u32)>> = vec![Vec::new(); NUM_CHROMOSOMES];
+    let mut bed_by_idx: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_chr];
     for region in enriched {
-        if let Some(idx) = mapper.get_chr_index(&region.segment) && idx < NUM_CHROMOSOMES {
+        if let Some(idx) = mapper.get_chr_index(&region.segment) && idx < n_chr {
             bed_by_idx[idx].push((region.start, region.end));
         }
     }
@@ -864,8 +880,8 @@ pub fn compute_seg_bases(
     let mut seg_counts: HashMap<String, usize> = HashMap::new();
 
     for (idx, chr_sites) in sites.iter().enumerate() {
-        if idx >= NUM_CHROMOSOMES { break; }
-        let chrom = match ContigMapper::chr_name_from_index(idx) {
+        if idx >= n_chr { break; }
+        let chrom = match mapper.chr_name_from_index(idx) {
             Some(name) => name,
             None => continue,
         };
