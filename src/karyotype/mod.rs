@@ -1046,16 +1046,13 @@ pub fn call_karyotype(
         } else if med < (delta / 2.0).max(cn2 / 4.0) {
             0
         } else {
-            // Ambiguous — pick closest of cn0, cn1, cn2
+            // Ambiguous — pick closest of cn1, cn2
+            let assigned = if (med - cn1).abs() < (med - cn2).abs() { 1 } else { 2 };
             debug!(
-                "Warning: Ambiguous copy number for {} (cov {:.2})",
-                chr, med
+                "Ambiguous CN for {} (cov {:.2}, cn1={:.2}, cn2={:.2}): assigned {}",
+                chr, med, cn1, cn2, assigned
             );
-            if (med - cn1).abs() < (med - cn2).abs() {
-                1
-            } else {
-                2
-            }
+            assigned
         };
 
         karyotype.insert(chr.clone(), cn);
