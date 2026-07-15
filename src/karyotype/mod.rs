@@ -1043,7 +1043,7 @@ pub fn call_karyotype(
         } else if med > cn3 + delta / 2.0 {
             // Est > 3
             ((med - cn2) / delta + 2.0).round() as usize
-        } else if med < (delta / 2.0).max(cn2 / 4.0) {
+        } else if med < cn2 / 2.0 - delta / 2.0 {
             0
         } else {
             // Ambiguous — pick closest of cn1, cn2
