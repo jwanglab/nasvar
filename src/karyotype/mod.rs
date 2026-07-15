@@ -631,6 +631,9 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
     // Sort by height descending (already sorted, but kept_indices order may differ)
     peaks.sort_by(|a, b| b.1.cmp(&a.1));
 
+    debug!("After peak finding: {} peaks: [{}]", peaks.len(),
+        peaks.iter().map(|(v, c)| format!("{:.1} ({})", v, c)).collect::<Vec<_>>().join(", "));
+
     // 5. Fine tune peaks
     // Median of points under peak +- 1.5 bins
     let mut refined_peaks = Vec::new();
@@ -661,11 +664,17 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         return Vec::new();
     }
 
+    debug!("After refinement: {} peaks: [{}]", refined_peaks.len(),
+        refined_peaks.iter().map(|(v, c)| format!("{:.1} ({})", v, c)).collect::<Vec<_>>().join(", "));
+
     // 6. Filter by height (> 5% of max)
     // Safety: refined_peaks is non-empty (checked above)
     let max_height = refined_peaks.iter().map(|x| x.1).max().unwrap();
     let threshold = max_height as f64 * 0.05;
     refined_peaks.retain(|x| x.1 as f64 > threshold);
+
+    debug!("After height filter (>5% of max={}): {} peaks: [{}]", max_height, refined_peaks.len(),
+        refined_peaks.iter().map(|(v, c)| format!("{:.1} ({})", v, c)).collect::<Vec<_>>().join(", "));
 
     // 7. Filter: must have segments assigned
     // Calculate medians for each segment
@@ -689,6 +698,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
     // (levels with only sex chromosomes shouldn't define tumor ploidy)
     let level_values: Vec<f64> = refined_peaks.iter().map(|(v, _)| *v).collect();
     let mut level_autosomal_counts: HashMap<usize, usize> = HashMap::new();
+    let mut level_segments: HashMap<usize, Vec<String>> = HashMap::new();
 
     for (chr, med) in &medians {
         // Find closest level (argmin of |level/median - 1|)
@@ -706,7 +716,13 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         let is_autosome = chr != "X" && chr != "Y";
         if best_ratio_diff < 0.3 && is_autosome {
             *level_autosomal_counts.entry(best_idx).or_insert(0) += 1;
+            level_segments.entry(best_idx).or_default().push(format!("{}({:.1})", chr, med));
         }
+    }
+
+    for (i, (lvl, _)) in refined_peaks.iter().enumerate() {
+        let segs = level_segments.get(&i).map(|v| v.join(", ")).unwrap_or_else(|| "none".to_string());
+        debug!("Level {:.1}: segments [{}]", lvl, segs);
     }
 
     // Keep only levels with at least one autosomal segment assigned
@@ -716,6 +732,9 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
             active_peaks.push((p_val, p_count));
         }
     }
+
+    debug!("After segment filter: {} peaks: [{}]", active_peaks.len(),
+        active_peaks.iter().map(|(v, c)| format!("{:.1} ({})", v, c)).collect::<Vec<_>>().join(", "));
 
     // 8. Filter duplicates (close peaks)
     // Tolerance 9.5%
@@ -746,6 +765,9 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
             }
         }
     }
+
+    debug!("After duplicate filter: {} peaks: [{}]", final_peaks.len(),
+        final_peaks.iter().map(|(v, c)| format!("{:.1} ({})", v, c)).collect::<Vec<_>>().join(", "));
 
     final_peaks
 }
@@ -933,7 +955,11 @@ pub fn call_karyotype(
         warnings.push(w);
     }
 
-    let levels = find_levels(&chrom_bins);
+    let bins_for_levels: HashMap<String, Vec<f64>> = chrom_bins.iter()
+        .filter(|(k, _)| k.as_str() != "17p" && k.as_str() != "19p" && k.as_str() != "19q")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let levels = find_levels(&bins_for_levels);
     info!("Found {} valid coverage levels.", levels.len());
     for (l, c) in &levels {
         debug!("Level: {:.4} (count {})", l, c);
@@ -1033,20 +1059,16 @@ pub fn call_karyotype(
         } else if med > cn3 + delta / 2.0 {
             // Est > 3
             ((med - cn2) / delta + 2.0).round() as usize
-        } else if med < delta / 2.0 {
+        } else if med < cn2 / 2.0 - delta / 2.0 {
             0
         } else {
-            // Ambiguous
+            // Ambiguous — pick closest of cn1, cn2
+            let assigned = if (med - cn1).abs() < (med - cn2).abs() { 1 } else { 2 };
             debug!(
-                "Warning: Ambiguous copy number for {} (cov {:.2})",
-                chr, med
+                "Ambiguous CN for {} (cov {:.2}, cn1={:.2}, cn2={:.2}): assigned {}",
+                chr, med, cn1, cn2, assigned
             );
-            // Closest?
-            if (med - cn2).abs() < (med - cn1).abs() {
-                2
-            } else {
-                1
-            } // Naive fallback
+            assigned
         };
 
         karyotype.insert(chr.clone(), cn);
@@ -1383,30 +1405,24 @@ fn resolve_cn_states(
             let d1 = (p1 - 0.5_f64).abs();
             let d2 = (p2 - 0.5_f64).abs();
 
-            if (d1 - d2).abs() > 0.04 {
-                // Meaningful difference — use closest-to-0.5 as diploid
-                if d1 < d2 {
-                    debug!(
-                        "MAF closest-to-0.5: v1 is diploid (MAF {:.4}, d={:.4}). v2 is CN3.",
-                        p1, d1
-                    );
-                    return (2.0 * v1 - v2, v1, v2);
-                } else {
-                    debug!(
-                        "MAF closest-to-0.5: v2 is diploid (MAF {:.4}, d={:.4}). v1 is CN1.",
-                        p2, d2
-                    );
-                    return (v1, v2, v2 + (v2 - v1));
-                }
+            if (d1 - d2).abs() < 0.04 {
+                let w = "MAF signals for the top two levels are too close. This may indicate low blast ratio.".to_string();
+                warn!("{}", w);
+                warnings.push(w);
             }
-
-            let w = "MAF signals for the top two levels are too close. This may indicate low blast ratio.".to_string();
-            warn!("{}", w);
-            warnings.push(w);
-            debug!(
-                "MAF distances from 0.5 too similar (d1={:.4}, d2={:.4}). Falling back to ratio logic.",
-                d1, d2
-            );
+            if d1 < d2 {
+                debug!(
+                    "MAF closest-to-0.5: v1 is diploid (MAF {:.4}, d={:.4}). v2 is CN3.",
+                    p1, d1
+                );
+                return (2.0 * v1 - v2, v1, v2);
+            } else {
+                debug!(
+                    "MAF closest-to-0.5: v2 is diploid (MAF {:.4}, d={:.4}). v1 is CN1.",
+                    p2, d2
+                );
+                return (v1, v2, v2 + (v2 - v1));
+            }
         } else if p1 > 0.4 {
             // Case 1: Only lower level has high MAF (>0.4)
             // Coverage ratio sanity check: if v2/v1 >= 1.6, the levels are actually 1n/2n
