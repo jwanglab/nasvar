@@ -47,11 +47,21 @@ pub struct ContigMapper {
     /// accession -> canonical index
     acc_to_idx: HashMap<String, usize>,
 
+    /// short bare name (e.g., "1", "X", "MT") -> canonical index. Populated
+    /// from each contig's chr name by stripping the `chr` prefix. `MT` is
+    /// registered as an alias for `chrM`. Lets the MAF writer emit
+    /// Ensembl-style short names to save disk space, and lets any reader
+    /// interpret them via the same `to_chr_name` / `get_chr_index` funnel.
+    short_to_idx: HashMap<String, usize>,
+
     /// canonical index -> chr name
     idx_to_chr: Vec<String>,
 
     /// canonical index -> accession
     idx_to_acc: Vec<String>,
+
+    /// canonical index -> short bare name (e.g., "1", "X").
+    idx_to_short: Vec<String>,
 
     /// Reference names actually present in the BAM/FASTA header
     bam_refs: HashSet<String>,
@@ -74,8 +84,10 @@ impl ContigMapper {
         let mut acc_to_chr = HashMap::new();
         let mut chr_to_idx = HashMap::new();
         let mut acc_to_idx = HashMap::new();
+        let mut short_to_idx = HashMap::new();
         let mut idx_to_chr = Vec::with_capacity(contigs.len());
         let mut idx_to_acc = Vec::with_capacity(contigs.len());
+        let mut idx_to_short = Vec::with_capacity(contigs.len());
 
         for (i, c) in contigs.iter().enumerate() {
             chr_to_acc.insert(c.name.clone(), c.accession.clone());
@@ -84,6 +96,13 @@ impl ContigMapper {
             acc_to_idx.insert(c.accession.clone(), i);
             idx_to_chr.push(c.name.clone());
             idx_to_acc.push(c.accession.clone());
+
+            // Short bare name: strip `chr` prefix. For mitochondrion we also
+            // register `MT` as an alias since it's the Ensembl convention.
+            let short = c.name.strip_prefix("chr").unwrap_or(&c.name).to_string();
+            short_to_idx.insert(short.clone(), i);
+            if short == "M" { short_to_idx.insert("MT".to_string(), i); }
+            idx_to_short.push(short);
         }
 
         Self {
@@ -92,8 +111,10 @@ impl ContigMapper {
             acc_to_chr,
             chr_to_idx,
             acc_to_idx,
+            short_to_idx,
             idx_to_chr,
             idx_to_acc,
+            idx_to_short,
             bam_refs: HashSet::new(),
         }
     }
@@ -204,11 +225,31 @@ impl ContigMapper {
 
     /// Translate any name to chr convention (for output/display).
     ///
-    /// Converts accession IDs to chr names. If already in chr format
-    /// or unrecognized, returns the input unchanged.
+    /// Accepts accession IDs (`NC_060925.1`), short bare names (`1`, `X`,
+    /// `MT`), or chr-style names (`chr1`); returns the canonical
+    /// chr-style form. Unrecognized names pass through unchanged.
     pub fn to_chr_name(&self, name: &str) -> String {
         if let Some(chr) = self.acc_to_chr.get(name) {
             return chr.clone();
+        }
+        if let Some(&idx) = self.short_to_idx.get(name) {
+            return self.idx_to_chr[idx].clone();
+        }
+        name.to_string()
+    }
+
+    /// Translate any name to its short bare form (e.g., `1`, `X`, `M`).
+    /// Used by the MAF writer to keep per-row chrom bytes minimal.
+    /// Unrecognized names pass through unchanged.
+    pub fn to_short_name(&self, name: &str) -> String {
+        if let Some(&idx) = self.chr_to_idx.get(name) {
+            return self.idx_to_short[idx].clone();
+        }
+        if let Some(&idx) = self.acc_to_idx.get(name) {
+            return self.idx_to_short[idx].clone();
+        }
+        if let Some(&idx) = self.short_to_idx.get(name) {
+            return self.idx_to_short[idx].clone();
         }
         name.to_string()
     }
@@ -229,12 +270,16 @@ impl ContigMapper {
 
     /// Get the canonical chromosome index for a name in any convention.
     ///
+    /// Accepts chr-style, accession, or short bare (`1`, `X`, `MT`) forms.
     /// Returns None for unrecognized names.
     pub fn get_chr_index(&self, name: &str) -> Option<usize> {
         if let Some(&idx) = self.chr_to_idx.get(name) {
             return Some(idx);
         }
         if let Some(&idx) = self.acc_to_idx.get(name) {
+            return Some(idx);
+        }
+        if let Some(&idx) = self.short_to_idx.get(name) {
             return Some(idx);
         }
         None

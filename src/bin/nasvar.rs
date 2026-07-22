@@ -34,6 +34,13 @@ struct Cli {
     /// Append to log file instead of truncating
     #[arg(long, global = true)]
     append_log: bool,
+    /// Emit optional diagnostic outputs — the pre-correction karyotype SVG,
+    /// both gc-vs-coverage scatter SVGs, and any focal-depth plots configured
+    /// in the pipeline config. Without this flag the pipeline writes only the
+    /// combined karyotype + BAF figure the report viewer displays; downstream
+    /// analyses (TSVs, MAF, .result.json, slice BAM) are unchanged.
+    #[arg(long, global = true)]
+    debug: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -632,16 +639,6 @@ fn main() {
             karyo_thresholds.min_depth = *min_depth;
             karyo_thresholds.plot_y_percentile = *plot_y_percentile;
 
-            // Load enriched BED once if provided — used for both MAF sufficiency
-            // (seg_bases) and the BAF-plot off-target filter.
-            let e_vec = match enriched {
-                Some(e) => match read_bed(e) {
-                    Ok(v) => Some(v),
-                    Err(err) => { error!("Error reading enriched BED {}: {}", e, err); return; }
-                },
-                None => None,
-            };
-
             // Compute seg_bases for MAF sufficiency check if sites and enriched are provided
             let (seg_bases, enriched_regions) = match (sites, enriched) {
                 (Some(s), Some(e)) => {
@@ -659,7 +656,10 @@ fn main() {
                 _ => (None, None),
             };
 
-            match nasvar::karyotype::call_karyotype_gc_corrected(coverage, maf.as_deref(), out_prefix, None, &ref_config, &karyo_thresholds, *gc_correction, seg_bases.as_ref(), enriched_regions.as_deref()) {
+            // Standalone karyotype: producing plots is the whole point of the
+            // subcommand, so ignore the global --debug gate and always emit
+            // the full diagnostic set.
+            match nasvar::karyotype::call_karyotype_gc_corrected(coverage, maf.as_deref(), out_prefix, None, &ref_config, &karyo_thresholds, *gc_correction, seg_bases.as_ref(), enriched_regions.as_deref(), true) {
                 Ok(karyo_output) => {
                     let collector = OutputCollector::new().with_karyotype(karyo_output);
                     if let Err(e) = collector.write_to_prefix(out_prefix) {
@@ -1037,8 +1037,8 @@ fn main() {
                     None => None,
                 });
 
-            let (pipeline_output, reads_aligned, focal_depths) = match runner.run(&mut br) {
-                Ok(r) => (r.output, r.reads_aligned, r.focal_depths),
+            let (pipeline_output, reads_aligned, focal_depths, coverage_bins) = match runner.run(&mut br) {
+                Ok(r) => (r.output, r.reads_aligned, r.focal_depths, r.coverage_bins),
                 Err(e) => {
                     error!("Error in PipelineRunner: {}", e);
                     return;
@@ -1061,23 +1061,46 @@ fn main() {
             let cov_file = format!("{}.coverage.tsv", out_prefix);
             let maf_file = format!("{}.maf", out_prefix);
 
-            // Karyotype (two-pass with GC bias correction)
+            // Karyotype (two-pass with GC bias correction).
+            //
+            // Prefer the in-memory hand-off from the pipeline. AS-alignment
+            // mode still writes its own TSV in the run, so if `coverage_bins`
+            // is None we fall back to the path-taking API (which just parses
+            // that TSV). Karyotype itself is what writes the unified 6-col
+            // `.coverage.tsv` at the end of its two-pass call.
             timer.start("Karyotype Analysis");
             let seg_bases = nasvar::karyotype::compute_seg_bases(&s_vec, &e_vec, &ref_config);
             let mut karyo_thresholds = pipeline_config.thresholds.karyotype.clone();
             karyo_thresholds.min_depth = *min_depth;
             karyo_thresholds.plot_y_percentile = *plot_y_percentile;
-            let (karyo_result, est_blast_ratio) = match nasvar::karyotype::call_karyotype_gc_corrected(
-                &cov_file,
-                Some(&maf_file),
-                out_prefix,
-                reads_aligned,
-                &ref_config,
-                &karyo_thresholds,
-                *gc_correction,
-                Some(&seg_bases),
-                Some(&e_vec),
-            ) {
+            let karyo_res_call = if let Some(ref bins) = coverage_bins {
+                nasvar::karyotype::call_karyotype_gc_corrected_from_bins(
+                    bins,
+                    Some(&maf_file),
+                    out_prefix,
+                    reads_aligned,
+                    &ref_config,
+                    &karyo_thresholds,
+                    *gc_correction,
+                    Some(&seg_bases),
+                    Some(&e_vec),
+                    cli.debug,
+                )
+            } else {
+                nasvar::karyotype::call_karyotype_gc_corrected(
+                    &cov_file,
+                    Some(&maf_file),
+                    out_prefix,
+                    reads_aligned,
+                    &ref_config,
+                    &karyo_thresholds,
+                    *gc_correction,
+                    Some(&seg_bases),
+                    Some(&e_vec),
+                    cli.debug,
+                )
+            };
+            let (karyo_result, est_blast_ratio) = match karyo_res_call {
                 Ok(karyo_output) => {
                     let br = karyo_output.blast_ratio;
                     (Some(karyo_output), br)
@@ -1095,18 +1118,15 @@ fn main() {
 
             // CNV (use GC-adjusted coverage if available)
             timer.start("CNV Calling");
-            let gc_adjusted_cov_file = format!("{}.coverage.gc_adjusted.tsv", out_prefix);
-            let cnv_cov_file = if std::path::Path::new(&gc_adjusted_cov_file).exists() {
-                &gc_adjusted_cov_file
-            } else {
-                &cov_file
-            };
+            // Unified `.coverage.tsv` carries both raw and gc-adjusted
+            // columns (see write_unified_coverage_tsv in karyotype). CNV's
+            // reader picks column 6 when present, falling back to column 4.
             let cnv_result = match call_cnvs(
                 &mut br,
                 &t_vec,
                 &pipeline_config,
                 CnvCallParams {
-                    coverage_file: Some(cnv_cov_file),
+                    coverage_file: Some(&cov_file),
                     blast_ratio: effective_blast_ratio,
                     karyotype: karyo_result.as_ref(),
                     ref_config: &ref_config,
@@ -1176,8 +1196,12 @@ fn main() {
             }
             timer.end();
 
-            // Focal depth plots
-            if !pipeline_config.focal_depth.plots.is_empty() {
+            // Focal-depth plots are diagnostic in the pipeline flow -- the
+            // interactive coverage panel supersedes them -- so keep them off
+            // by default and re-enable with --debug. The standalone
+            // `focal-depth` subcommand below is unaffected (its whole job is
+            // to produce a plot).
+            if cli.debug && !pipeline_config.focal_depth.plots.is_empty() {
                 timer.start("Focal Depth Plots");
                 for plot_cfg in &pipeline_config.focal_depth.plots {
                     if let Err(e) = nasvar::var::focal_depth::plot_focal_depth(&mut br, plot_cfg, out_prefix) {

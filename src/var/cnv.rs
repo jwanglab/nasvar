@@ -280,12 +280,21 @@ fn calculate_local_depths_raw(
 
     for line in reader.lines() {
         let l = line?;
+        if l.starts_with("chromosome") { continue; }
         let p: Vec<&str> = l.split('\t').collect();
         if p.len() < 4 {
             continue;
         }
-
-        let val: f64 = p[3].parse().unwrap_or(0.0);
+        // Unified TSV: column 6 is `n_reads_gc_adj` (GC-corrected coverage).
+        // Prefer it when present and finite; fall back to column 4 (raw)
+        // otherwise, which also covers legacy 5-column files and the
+        // no-karyotype standalone-coverage path.
+        let raw: f64 = p[3].parse().unwrap_or(0.0);
+        let val: f64 = if p.len() >= 6 {
+            p[5].parse::<f64>().ok().filter(|v| v.is_finite()).unwrap_or(raw)
+        } else {
+            raw
+        };
         let start: usize = p[1].parse().unwrap_or(0);
         let end: usize = p[2].parse().unwrap_or(0);
         bins.push((p[0].to_string(), start, end, val));

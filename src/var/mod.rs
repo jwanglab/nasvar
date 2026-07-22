@@ -1,5 +1,6 @@
 pub mod cnv;
 pub mod coverage;
+pub mod coverage_binary;
 pub mod focal_depth;
 pub mod fusion_consensus;
 pub mod fusions;

@@ -8,7 +8,12 @@ use crate::var::maf::Site;
 use crate::utils::bed::BedRegion;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
+
+// CoverageBin lives with the accumulator that produces it. Re-export here
+// so callers still importing `crate::karyotype::CoverageBin` (mostly the
+// standalone karyotype subcommand, plotting helpers, tests) don't break.
+pub use crate::var::coverage::{CoverageBin, parse_coverage_tsv};
 
 // GC bias correction method
 
@@ -26,15 +31,8 @@ pub enum GcCorrectionMethod {
 
 // Data structures
 
-#[derive(Debug, Clone)]
-pub struct CoverageBin {
-    pub chrom: String,
-    pub start: u32,
-    pub end: u32,
-    pub coverage: f64,         // Normalized coverage
-    pub maf_data: Option<f64>, // MAF at this bin location (if any)
-    pub gc_content: Option<f64>, // GC content fraction for this bin
-}
+// CoverageBin is re-exported at the top of the file. Field access downstream
+// stays exactly the same as before the move.
 
 // --------------------------------------------------------------------------------
 // Constants & Lookups
@@ -345,41 +343,9 @@ fn human_sort(a: &str, b: &str) -> std::cmp::Ordering {
 // Parsing Logic
 // --------------------------------------------------------------------------------
 
+/// Legacy wrapper around `crate::var::coverage::parse_coverage_tsv`
 pub fn parse_coverage(cov_path: &str) -> Result<Vec<CoverageBin>, Box<dyn std::error::Error>> {
-    let file = File::open(cov_path)?;
-    let reader = BufReader::new(file);
-    let mut bins = Vec::new();
-
-    for line in reader.lines() {
-        let l = line?;
-        if l.starts_with("chromosome") {
-            continue;
-        }
-        let parts: Vec<&str> = l.split('\t').collect();
-        if parts.len() < 4 {
-            continue;
-        }
-
-        let chrom = parts[0].to_string();
-        let start: u32 = parts[1].parse()?;
-        let end: u32 = parts[2].parse()?;
-        let cov: f64 = parts[3].parse()?;
-        let gc = if parts.len() >= 5 {
-            parts[4].parse::<f64>().ok().filter(|v| v.is_finite())
-        } else {
-            None
-        };
-
-        bins.push(CoverageBin {
-            chrom,
-            start,
-            end,
-            coverage: cov,
-            maf_data: None,
-            gc_content: gc,
-        });
-    }
-    Ok(bins)
+    Ok(parse_coverage_tsv(cov_path)?)
 }
 
 // --------------------------------------------------------------------------------
@@ -454,18 +420,6 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_dept
         by_chr
     });
 
-    // Build per-chr-index interval lookup for enriched filter (if provided)
-    let bed_by_idx: Option<Vec<Vec<(u32, u32)>>> = enriched.map(|regions| {
-        let mut by_idx: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_chr];
-        for r in regions {
-            if let Some(idx) = mapper.get_chr_index(&r.segment) && idx < n_chr {
-                by_idx[idx].push((r.start, r.end));
-            }
-        }
-        by_idx
-    });
-    let mut filtered_off_target: u64 = 0;
-
     for line in reader.lines() {
         let l = line?;
         if l.starts_with("chrom") || l.starts_with("WARNING") {
@@ -506,9 +460,6 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_dept
         if let Some(segment) = get_segment_from_pos(chrom, pos, ref_config) {
             bafs.entry(segment).or_default().push(value);
         }
-    }
-    if filtered_off_target > 0 {
-        info!("BAF plot: dropped {} MAF sites outside enriched regions", filtered_off_target);
     }
     Ok(bafs)
 }
@@ -921,6 +872,7 @@ pub fn compute_seg_bases(
     seg_counts
 }
 
+/// reads the coverage TSV from a path, then delegates to the in-memory `_from_bins` variant
 pub fn call_karyotype(
     cov_path: &str,
     maf_path: Option<&str>,
@@ -930,6 +882,18 @@ pub fn call_karyotype(
     seg_bases: Option<&HashMap<String, usize>>,
 ) -> Result<KaryotypeOutput, Box<dyn std::error::Error>> {
     let bins = parse_coverage(cov_path)?;
+    call_karyotype_from_bins(&bins, maf_path, reads_aligned, ref_config, thresholds, seg_bases)
+}
+
+pub fn call_karyotype_from_bins(
+    bins: &[CoverageBin],
+    maf_path: Option<&str>,
+    reads_aligned: Option<u64>,
+    ref_config: &ReferenceConfig,
+    thresholds: &KaryotypeThresholds,
+    seg_bases: Option<&HashMap<String, usize>>,
+) -> Result<KaryotypeOutput, Box<dyn std::error::Error>> {
+    let bins = bins.to_vec();
     let mut warnings: Vec<String> = Vec::new();
 
     // Group by chrom (segment) using get_segment
@@ -1779,29 +1743,35 @@ fn gc_correct_coverage(
     (corrected, curve_points)
 }
 
-/// Write coverage bins to a TSV file.
-fn write_coverage_tsv(
+/// Emit the unified `.coverage.tsv` (6-column) using the raw bins as the
+/// source of `n_reads` / `gc_content`, and — when the caller has them —
+/// filling column 6 (`n_reads_gc_adj`) from a parallel corrected slice.
+/// The two slices must share the same length and per-row (chrom, start, end)
+/// order; that invariant holds because `gc_correct_coverage` produces the
+/// corrected slice by mapping the raw slice element-wise.
+fn write_unified_coverage_tsv(
     path: &str,
-    bins: &[CoverageBin],
+    raw_bins: &[CoverageBin],
+    corrected_bins: Option<&[CoverageBin]>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = File::create(path)?;
-    writeln!(file, "chromosome\tbin_start\tbin_end\tn_reads\tgc_content")?;
-    for b in bins {
-        let gc_str = match b.gc_content {
-            Some(gc) => format!("{:.4}", gc),
-            None => "NaN".to_string(),
-        };
-        writeln!(file, "{}\t{}\t{}\t{:.4}\t{}", b.chrom, b.start, b.end, b.coverage, gc_str)?;
+    let mut merged: Vec<CoverageBin> = raw_bins.to_vec();
+    if let Some(corr) = corrected_bins {
+        if corr.len() != merged.len() {
+            warn!(
+                "coverage tsv: corrected slice has {} bins, raw has {} — column 6 will be NA",
+                corr.len(), merged.len(),
+            );
+        } else {
+            for (m, c) in merged.iter_mut().zip(corr.iter()) {
+                m.coverage_gc_adj = Some(c.coverage);
+            }
+        }
     }
+    crate::var::coverage::CoverageAccumulator::write_bins_tsv(path, &merged)?;
     Ok(())
 }
 
-/// Two-pass karyotype calling with GC bias correction.
-///
-/// Pass 1: Initial karyotype estimate from raw coverage
-/// Pass 2: GC-correct coverage using majority-ploidy bins, then re-run karyotype
-///
-/// When `gc_correction` is `None`, skips GC correction entirely (returns Pass 1 result).
+/// reads the coverage TSV once from disk, then delegates to `call_karyotype_gc_corrected_from_bins`
 pub fn call_karyotype_gc_corrected(
     cov_path: &str,
     maf_path: Option<&str>,
@@ -1812,14 +1782,48 @@ pub fn call_karyotype_gc_corrected(
     gc_correction: GcCorrectionMethod,
     seg_bases: Option<&HashMap<String, usize>>,
     enriched: Option<&[BedRegion]>,
+    debug_svgs: bool,
+) -> Result<KaryotypeOutput, Box<dyn std::error::Error>> {
+    let bins = parse_coverage(cov_path)?;
+    call_karyotype_gc_corrected_from_bins(
+        &bins, maf_path, out_prefix, reads_aligned, ref_config, thresholds,
+        gc_correction, seg_bases, enriched, debug_svgs,
+    )
+}
+
+/// Two-pass karyotype calling with GC bias correction
+///
+/// Pass 1: Initial karyotype estimate from raw coverage.
+/// Pass 2: GC-correct coverage using majority-ploidy bins, re-run karyotype.
+///
+/// When `gc_correction` is `None`, skips GC correction and returns the
+/// pass-1 result. The unified `<out_prefix>.coverage.tsv` (6 columns:
+/// raw counts + gc content + gc-corrected counts) is always written
+#[allow(clippy::too_many_arguments)]
+pub fn call_karyotype_gc_corrected_from_bins(
+    bins: &[CoverageBin],
+    maf_path: Option<&str>,
+    out_prefix: &str,
+    reads_aligned: Option<u64>,
+    ref_config: &ReferenceConfig,
+    thresholds: &KaryotypeThresholds,
+    gc_correction: GcCorrectionMethod,
+    seg_bases: Option<&HashMap<String, usize>>,
+    enriched: Option<&[BedRegion]>,
+    debug_svgs: bool,
 ) -> Result<KaryotypeOutput, Box<dyn std::error::Error>> {
     // Pass 1: initial karyotype
     info!("=== GC Correction Pass 1: Initial karyotype ===");
-    let initial_output = call_karyotype(cov_path, maf_path, reads_aligned, ref_config, thresholds, seg_bases)?;
+    let initial_output = call_karyotype_from_bins(bins, maf_path, reads_aligned, ref_config, thresholds, seg_bases)?;
 
-    // If no GC correction requested, return Pass 1 directly
+    // If no GC correction requested, write the raw-only unified TSV and
+    // return the pass-1 result.
     if gc_correction == GcCorrectionMethod::None {
         info!("GC correction disabled, returning Pass 1 result");
+        let unified_path = format!("{}.coverage.tsv", out_prefix);
+        if let Err(e) = write_unified_coverage_tsv(&unified_path, bins, None) {
+            warn!("Could not write unified coverage TSV {}: {}", unified_path, e);
+        }
         return Ok(initial_output);
     }
 
@@ -1827,39 +1831,41 @@ pub fn call_karyotype_gc_corrected(
 
     if karyotype.is_empty() {
         warn!("GC correction: no karyotype data, skipping correction");
+        let unified_path = format!("{}.coverage.tsv", out_prefix);
+        if let Err(e) = write_unified_coverage_tsv(&unified_path, bins, None) {
+            warn!("Could not write unified coverage TSV {}: {}", unified_path, e);
+        }
         return Ok(initial_output);
     }
 
-    // Parse bins (with GC content)
-    let bins = parse_coverage(cov_path)?;
+    let bins: Vec<CoverageBin> = bins.to_vec();
 
     let y_pct = thresholds.plot_y_percentile;
 
-    // Plot pre-correction karyotype
-    let pre_plot_path = format!("{}.karyotype.svg", out_prefix);
-    plot::plot_karyotype(&bins, ref_config, &pre_plot_path, "Karyotype (raw)", y_pct);
+    // Diagnostic SVGs
+    if debug_svgs {
+        let pre_plot_path = format!("{}.karyotype.svg", out_prefix);
+        plot::plot_karyotype(&bins, ref_config, &pre_plot_path, "Karyotype (raw)", y_pct);
+    }
 
     // Apply GC correction
     info!("=== GC Correction ({:?}): Adjusting coverage ===", gc_correction);
     let (corrected_bins, curve_points) = gc_correct_coverage(&bins, karyotype, ref_config, gc_correction);
 
-    // Plot GC vs coverage (raw)
-    let gc_plot_path = format!("{}.gc_vs_coverage.svg", out_prefix);
-    plot::plot_gc_vs_coverage(&bins, ref_config, karyotype, &curve_points, &gc_plot_path, "Coverage vs GC Content");
+    if debug_svgs {
+        // Plot GC vs coverage (raw)
+        let gc_plot_path = format!("{}.gc_vs_coverage.svg", out_prefix);
+        plot::plot_gc_vs_coverage(&bins, ref_config, karyotype, &curve_points, &gc_plot_path, "Coverage vs GC Content");
 
-    // Plot GC vs coverage (adjusted)
-    let gc_adj_plot_path = format!("{}.gc_vs_coverage.gc_corrected.svg", out_prefix);
-    plot::plot_gc_vs_coverage(&corrected_bins, ref_config, karyotype, &curve_points, &gc_adj_plot_path, "Coverage vs GC Content (GC Corrected)");
-
-    // Write corrected coverage
-    let corrected_cov_path = format!("{}.coverage.gc_adjusted.tsv", out_prefix);
-    write_coverage_tsv(&corrected_cov_path, &corrected_bins)?;
-    info!("Wrote GC-adjusted coverage to {}", corrected_cov_path);
+        // Plot GC vs coverage (adjusted)
+        let gc_adj_plot_path = format!("{}.gc_vs_coverage.gc_corrected.svg", out_prefix);
+        plot::plot_gc_vs_coverage(&corrected_bins, ref_config, karyotype, &curve_points, &gc_adj_plot_path, "Coverage vs GC Content (GC Corrected)");
+    }
 
     // Pass 2: re-run karyotype on corrected coverage
     info!("=== GC Correction Pass 2: Corrected karyotype ===");
-    let result = call_karyotype(
-        &corrected_cov_path,
+    let result = call_karyotype_from_bins(
+        &corrected_bins,
         maf_path,
         reads_aligned,
         ref_config,
@@ -1867,11 +1873,11 @@ pub fn call_karyotype_gc_corrected(
         seg_bases,
     );
 
-    // Plot post-correction karyotype
-    let post_plot_path = format!("{}.karyotype.gc_corrected.svg", out_prefix);
-    plot::plot_karyotype(&corrected_bins, ref_config, &post_plot_path, "Karyotype (GC corrected)", y_pct);
-
-    // Plot combined karyotype + BAF
+    // Combined karyotype + BAF figure — this is the plot the report viewer
+    // renders, so we produce it whenever the MAF is available regardless of
+    // --debug. The karyotype-only variant serves as a fallback for packages
+    // without a MAF, and is otherwise diagnostic-only (behind --debug).
+    let mut wrote_combined = false;
     if let Some(maf_p) = maf_path {
         match parse_maf_for_plot(maf_p, ref_config, thresholds.min_depth, enriched) {
             Ok(baf_data) => {
@@ -1880,9 +1886,23 @@ pub fn call_karyotype_gc_corrected(
                     &corrected_bins, &baf_data, ref_config,
                     &combined_path, "Karyotype + BAF (GC corrected)", y_pct,
                 );
+                wrote_combined = true;
             }
             Err(e) => warn!("Could not parse MAF for BAF plot: {}", e),
         }
+    }
+    if debug_svgs || !wrote_combined {
+        let post_plot_path = format!("{}.karyotype.gc_corrected.svg", out_prefix);
+        plot::plot_karyotype(&corrected_bins, ref_config, &post_plot_path, "Karyotype (GC corrected)", y_pct);
+    }
+
+    // Unified `.coverage.tsv` — one 6-column file carrying both the raw
+    // mask-adjusted counts and the GC-corrected values in `n_reads_gc_adj`.
+    let unified_path = format!("{}.coverage.tsv", out_prefix);
+    if let Err(e) = write_unified_coverage_tsv(&unified_path, &bins, Some(&corrected_bins)) {
+        warn!("Could not write unified coverage TSV {}: {}", unified_path, e);
+    } else {
+        info!("Wrote unified coverage (raw + gc-adjusted) to {}", unified_path);
     }
 
     result

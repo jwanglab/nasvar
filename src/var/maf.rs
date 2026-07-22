@@ -220,7 +220,11 @@ pub fn calc_maf(
             }
         }
 
-        // Write results (all sites, including sub-threshold)
+        // Write results (all sites, including sub-threshold). Emit the
+        // short bare chrom form so the MAF payload stays compact
+        // regardless of what naming convention the BED / BAM happened to
+        // use. Readers normalize via `ContigMapper::to_chr_name`.
+        let short_chrom = bam.contig_mapper.to_short_name(&target.segment);
         for site in &target_sites {
             if let Some(cnt) = counts.get(&site.pos) {
                 let ref_ct = cnt[site.al0 as usize];
@@ -228,7 +232,7 @@ pub fn calc_maf(
                 writeln!(
                     file,
                     "{}\t{}\t{}\t{}",
-                    target.segment, site.pos, ref_ct, alt_ct
+                    short_chrom, site.pos, ref_ct, alt_ct
                 )?;
             }
         }

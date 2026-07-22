@@ -18,6 +18,11 @@ pub struct PipelineResult {
     pub output: UnifiedOutput,
     pub reads_aligned: Option<u64>,
     pub focal_depths: Option<HashMap<String, f64>>,
+    /// 1 Mb coverage bins from the main-BAM accumulator, ready to hand to
+    /// `call_karyotype_gc_corrected_from_bins`. `None` when this run used
+    /// adaptive-sampling coverage (which writes its own TSV) or lacked a
+    /// coverage repeats mask so no accumulator ran.
+    pub coverage_bins: Option<Vec<crate::var::coverage::CoverageBin>>,
 }
 
 pub struct PipelineRunner<'a> {
@@ -168,6 +173,14 @@ impl<'a> PipelineRunner<'a> {
             .as_ref()
             .map(|targets| QcAccumulator::new(&header, targets, &contigs));
 
+        // 100 kb whole-genome binary coverage: raw primary-read starts per
+        // 100 kb bin, no mask filter, no gap dropping. Consumed by the
+        // drop-zone viewer, which parses the fixed-grid layout in a single
+        // pass and indexes by `pos / BIN_SIZE`. Sidesteps the karyotype
+        // accumulator entirely so we don't perturb the 1 Mb pipeline it
+        // depends on.
+        let mut cov100k_acc = crate::var::coverage_binary::BinaryCoverage100k::new(&header);
+
 
         // Main Loop
         info!("Pass 1: Main Scan...");
@@ -200,14 +213,25 @@ impl<'a> PipelineRunner<'a> {
             if let Some(q) = &mut qc_acc {
                 q.process(&record);
             }
+            cov100k_acc.process(&record);
         }
         info!("Processed {} reads. Done.", i);
+
+        // Write the 100 kb binary track once pass-1 is done. Failure here is
+        // a warning, not a hard error -- the file is a viewer convenience and
+        // the pipeline's variant/karyotype outputs don't depend on it.
+        let cov100k_path = format!("{}.coverage_100k.bin", self.out_prefix);
+        if let Err(e) = cov100k_acc.write(&cov100k_path) {
+            log::warn!("[coverage-100k] failed to write {}: {}", cov100k_path, e);
+        }
 
         // Pass-1 stream is done. If we were building an inline BAI, finalize
         // it now so the subsequent random-access stages can query.
         bam.finalize_inline_index()?;
 
-        // Adaptive sampling coverage scan (replaces main BAM for coverage and reads_aligned)
+        // Adaptive sampling coverage scan (replaces main BAM for coverage and reads_aligned).
+        // The AS path still writes its own TSV here -- it doesn't feed the
+        // karyotype step and no in-memory hand-off is needed.
         let as_reads_aligned: Option<u64> = if let Some(ref as_path) = self.as_alignments
             && let Some(reps) = &self.coverage_repeats
         {
@@ -222,10 +246,12 @@ impl<'a> PipelineRunner<'a> {
             None
         };
 
-        // Write coverage from main BAM (when not using AS alignments)
-        if let Some(c) = cov_acc {
-            c.write_output(&format!("{}.coverage.tsv", self.out_prefix), true)?;
-        }
+        // Main-BAM coverage: hand bins to the caller in memory. The karyotype
+        // step is what writes the unified `.coverage.tsv` (raw + gc-adjusted
+        // in one 6-column file) at the end of its two-pass call. This kills
+        // the historical two-round-trip pattern where pipeline wrote a TSV
+        // that karyotype then re-read.
+        let coverage_bins: Option<Vec<crate::var::coverage::CoverageBin>> = cov_acc.map(|c| c.to_bins());
 
         // Write MAF
         if let Some(m) = maf_acc {
@@ -330,6 +356,7 @@ impl<'a> PipelineRunner<'a> {
             output: collector.build(),
             reads_aligned,
             focal_depths,
+            coverage_bins,
         })
     }
 }
@@ -342,6 +369,10 @@ use crate::utils::metadata::extract_from_header as extract_metadata_from_header;
 pub struct MafAccumulator {
     sites: Vec<Vec<Site>>,
     counts: Vec<Vec<[u32; 5]>>,
+    /// Retained so the writer can translate BAM ref names (which may be
+    /// accessions) to short bare forms (`1`, `X`, `M`) when serializing.
+    /// Cuts ~7 chars per data row for T2T-CHM13 accession-style BAMs.
+    mapper: ContigMapper,
 }
 
 impl MafAccumulator {
@@ -368,6 +399,7 @@ impl MafAccumulator {
         Self {
             sites: sites_by_ref,
             counts,
+            mapper,
         }
     }
 
@@ -442,7 +474,13 @@ impl MafAccumulator {
             if sites.is_empty() {
                 continue;
             }
-            let name = &header.refs[id];
+            // Emit the short bare form (`1`, `2`, …, `X`, `Y`, `M`) rather
+            // than the BAM header's own name — for a T2T-CHM13 accession
+            // BAM that trims ~10 chars/row across ~200 k rows (~2 MB).
+            // Any consumer via `ContigMapper::to_chr_name` normalizes the
+            // short form back to `chr*`.
+            let bam_name = &header.refs[id];
+            let name = self.mapper.to_short_name(bam_name);
 
             for (i, site) in sites.iter().enumerate() {
                 let cnt = self.counts[id][i];

@@ -55,7 +55,6 @@ pub fn load_gc_bins(path: &str, bin_size: usize) -> Result<GcBinMap, Box<dyn std
 // Used by both standalone read_depth() and pipeline mode
 
 struct ChromData {
-    name: String,
     mapped_name: String,
     len: usize,
     mask: BitVec,
@@ -189,7 +188,6 @@ impl CoverageAccumulator {
                 };
 
                 chroms.push(Some(ChromData {
-                    name: name.clone(),
                     mapped_name,
                     len,
                     mask,
@@ -217,7 +215,6 @@ impl CoverageAccumulator {
                 };
 
                 chroms.push(Some(ChromData {
-                    name: name.clone(),
                     mapped_name,
                     len,
                     mask: bitvec![0; 1], // minimal mask - we'll handle specially in process()
@@ -340,60 +337,147 @@ impl CoverageAccumulator {
         self.reads_aligned
     }
 
-    /// Write coverage output to file.
-    /// If include_gc is true, writes GC content column (pipeline format).
-    /// If include_gc is false, writes 4-column format (standalone format).
-    pub fn write_output(&self, path: &str, include_gc: bool) -> std::io::Result<()> {
-        let mut file = File::create(path)?;
-
-        if include_gc {
-            writeln!(file, "chromosome\tbin_start\tbin_end\tn_reads\tgc_content")?;
-        } else {
-            writeln!(file, "chromosome\tbin_start\tbin_end\tn_reads")?;
-        }
-
+    /// Return the accumulator's bins in memory in the same shape and order
+    /// the TSV would emit. Any bin whose unmasked fraction is at or below
+    /// 25 % of `bin_size` is dropped (same threshold as `write_output`), so
+    /// the resulting Vec is the exact input the karyotype call expects.
+    ///
+    /// Callers that need to also render / carry gc-corrected values fill
+    /// `coverage_gc_adj` themselves after running the fit; leave it `None`
+    /// when only the raw pass exists.
+    pub fn to_bins(&self) -> Vec<CoverageBin> {
+        let mut out = Vec::new();
         for data in self.chroms.iter().flatten() {
-            debug!("Writing coverage for {}...", data.name);
-
             for (i, (&unmasked, &reads)) in data
                 .bin_unmasked_counts
                 .iter()
                 .zip(data.bin_read_counts.iter())
                 .enumerate()
             {
-                let start = i * self.bin_size;
-                let end = std::cmp::min((i + 1) * self.bin_size, data.len);
-
                 let threshold = (self.bin_size as f64 * 0.25) as u32;
-                if unmasked > threshold {
-                    let mut value = reads as f64;
-                    value *= self.bin_size as f64 / unmasked as f64;
+                if unmasked <= threshold { continue; }
 
-                    if include_gc {
-                        let gc = data.bin_gc_content[i];
-                        if gc.is_nan() {
-                            writeln!(
-                                file,
-                                "{}\t{}\t{}\t{:.0}\tNA",
-                                data.mapped_name, start, end, value
-                            )?;
-                        } else {
-                            writeln!(
-                                file,
-                                "{}\t{}\t{}\t{:.0}\t{:.4}",
-                                data.mapped_name, start, end, value, gc
-                            )?;
-                        }
-                    } else {
-                        // Truncate depth to integer for output
-                        let value_int = value as u64;
-                        writeln!(file, "{}\t{}\t{}\t{}", data.mapped_name, start, end, value_int)?;
-                    }
-                }
+                let start = (i * self.bin_size) as u32;
+                let end = std::cmp::min((i + 1) * self.bin_size, data.len) as u32;
+                let mut value = reads as f64;
+                value *= self.bin_size as f64 / unmasked as f64;
+
+                let gc = data.bin_gc_content[i] as f64;
+                let gc_opt = if gc.is_nan() { None } else { Some(gc) };
+
+                out.push(CoverageBin {
+                    chrom: data.mapped_name.clone(),
+                    start,
+                    end,
+                    coverage: value,
+                    coverage_gc_adj: None,
+                    maf_data: None,
+                    gc_content: gc_opt,
+                });
             }
+        }
+        out
+    }
+
+    /// Serialize a set of bins to disk in the unified 6-column format used
+    /// by the whole pipeline. Column 6 (`n_reads_gc_adj`) is populated when
+    /// the bin's `coverage_gc_adj` is `Some`; otherwise emitted as `NA`.
+    ///
+    /// The single-writer path replaces the historical split between
+    /// `.coverage.tsv` (5-col, raw) and `.coverage.gc_adjusted.tsv` (5-col,
+    /// corrected). Downstream readers pick a column based on what they need.
+    pub fn write_bins_tsv(path: &str, bins: &[CoverageBin]) -> std::io::Result<()> {
+        let mut file = File::create(path)?;
+        writeln!(file, "chromosome\tbin_start\tbin_end\tn_reads\tgc_content\tn_reads_gc_adj")?;
+        for b in bins {
+            let gc = match b.gc_content {
+                Some(v) => format!("{:.4}", v),
+                None => "NA".to_string(),
+            };
+            let adj = match b.coverage_gc_adj {
+                Some(v) => format!("{:.4}", v),
+                None => "NA".to_string(),
+            };
+            writeln!(
+                file, "{}\t{}\t{}\t{:.0}\t{}\t{}",
+                b.chrom, b.start, b.end, b.coverage, gc, adj,
+            )?;
         }
         Ok(())
     }
+
+    /// Legacy: write the raw 5-column TSV. Kept only for the standalone
+    /// `nasvar coverage` subcommand and its downstream (which may not have
+    /// a karyotype step to produce gc-adjusted values). Prefer `to_bins()`
+    /// + `write_bins_tsv()` in new code so we stay on the unified schema.
+    pub fn write_output(&self, path: &str, include_gc: bool) -> std::io::Result<()> {
+        let bins = self.to_bins();
+        // include_gc is retained for signature compatibility; the unified
+        // writer always emits GC (as `NA` when unknown), so a caller passing
+        // false effectively gets the same 6-col file. Callers that truly
+        // need a 4-col format should filter after read.
+        let _ = include_gc;
+        Self::write_bins_tsv(path, &bins)
+    }
+}
+
+// ============================================================================
+// CoverageBin — the pipeline's per-bin coverage row, shared between the
+// accumulator, the karyotype call, CNV, and the TSV reader/writer. Kept in
+// this module because the accumulator is the canonical producer; karyotype
+// re-exports it so existing `use crate::karyotype::CoverageBin` imports
+// still resolve.
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct CoverageBin {
+    pub chrom: String,
+    pub start: u32,
+    pub end: u32,
+    /// Mask-adjusted coverage (raw, `reads × bin_size / unmasked`).
+    pub coverage: f64,
+    /// GC-corrected coverage (raw × GC-fit scale). `None` until the
+    /// karyotype step's fit has been applied.
+    pub coverage_gc_adj: Option<f64>,
+    /// Median MAF at bin locations (populated by the karyotype step for
+    /// BAF-heavy plots; unused by the accumulator itself).
+    pub maf_data: Option<f64>,
+    /// GC fraction across the (unmasked) bases in this bin. `None` when
+    /// the FASTA wasn't available so GC couldn't be computed.
+    pub gc_content: Option<f64>,
+}
+
+/// Read the unified 6-column TSV (or a legacy 5-column raw file) back into
+/// `CoverageBin`s. Column 6 (`n_reads_gc_adj`) is optional; when absent or
+/// `"NA"`, the returned bin's `coverage_gc_adj` is `None`.
+pub fn parse_coverage_tsv(cov_path: &str) -> std::io::Result<Vec<CoverageBin>> {
+    let file = File::open(cov_path)?;
+    let reader = BufReader::new(file);
+    let mut bins = Vec::new();
+    for line in reader.lines() {
+        let l = line?;
+        if l.starts_with("chromosome") { continue; }
+        let p: Vec<&str> = l.split('\t').collect();
+        if p.len() < 4 { continue; }
+        let chrom = p[0].to_string();
+        let start: u32 = p[1].parse().unwrap_or(0);
+        let end:   u32 = p[2].parse().unwrap_or(0);
+        let cov:   f64 = p[3].parse().unwrap_or(0.0);
+        let gc = if p.len() >= 5 {
+            p[4].parse::<f64>().ok().filter(|v| v.is_finite())
+        } else { None };
+        let gc_adj = if p.len() >= 6 {
+            p[5].parse::<f64>().ok().filter(|v| v.is_finite())
+        } else { None };
+        bins.push(CoverageBin {
+            chrom, start, end,
+            coverage: cov,
+            coverage_gc_adj: gc_adj,
+            maf_data: None,
+            gc_content: gc,
+        });
+    }
+    Ok(bins)
 }
 
 // ==================== End CoverageAccumulator ====================
@@ -486,5 +570,71 @@ pub fn scan_as_alignments_with_gc(
 
     info!("AS alignments: processed {} records from {}", count, path);
     Ok(accumulator)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_path(tag: &str) -> String {
+        std::env::temp_dir()
+            .join(format!("nasvar_covtsv_{}_{}.tsv", tag, std::process::id()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn unified_tsv_roundtrips_with_and_without_gc_adj() {
+        let bins = vec![
+            CoverageBin {
+                chrom: "chr1".to_string(), start: 0, end: 1_000_000,
+                coverage: 1234.0,
+                coverage_gc_adj: Some(1200.5),
+                maf_data: None,
+                gc_content: Some(0.412),
+            },
+            CoverageBin {
+                chrom: "chr1".to_string(), start: 1_000_000, end: 2_000_000,
+                coverage: 987.0,
+                coverage_gc_adj: None,     // pass-1-only bin
+                maf_data: None,
+                gc_content: None,          // GC unknown
+            },
+        ];
+        let path = scratch_path("both");
+        CoverageAccumulator::write_bins_tsv(&path, &bins).unwrap();
+        let back = parse_coverage_tsv(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].chrom, "chr1");
+        assert_eq!(back[0].start, 0);
+        assert_eq!(back[0].coverage, 1234.0);
+        assert_eq!(back[0].coverage_gc_adj, Some(1200.5));
+        assert!((back[0].gc_content.unwrap() - 0.412).abs() < 1e-4);
+        assert_eq!(back[1].coverage, 987.0);
+        assert!(back[1].coverage_gc_adj.is_none());
+        assert!(back[1].gc_content.is_none());
+    }
+
+    #[test]
+    fn parse_accepts_legacy_five_column_files() {
+        // Older packages predate the unified schema and only ship 5
+        // columns (no gc_adj). Reader should still produce sane bins.
+        let path = scratch_path("legacy5");
+        std::fs::write(
+            &path,
+            b"chromosome\tbin_start\tbin_end\tn_reads\tgc_content\n\
+              chr1\t0\t1000000\t1234\t0.412\n\
+              chr2\t0\t500000\t42\tNA\n",
+        ).unwrap();
+        let back = parse_coverage_tsv(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].coverage, 1234.0);
+        assert!(back[0].coverage_gc_adj.is_none()); // column 6 absent
+        assert!((back[0].gc_content.unwrap() - 0.412).abs() < 1e-4);
+        assert_eq!(back[1].coverage, 42.0);
+        assert!(back[1].gc_content.is_none());     // "NA" → None
+    }
 }
 
