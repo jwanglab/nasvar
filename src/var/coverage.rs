@@ -534,9 +534,29 @@ pub fn scan_as_alignments(
     contigs: &[Contig],
 ) -> Result<CoverageAccumulator, Box<dyn std::error::Error>>
 {
-    scan_as_alignments_with_gc(path, bam_header, repeats, ref_path, None, contigs)
+    scan_as_alignments_with_gc(path, bam_header, repeats, ref_path, None, contigs, None)
 }
 
+/// Scan an adaptive-sampling BAM for coverage. Returns the mask-adjusted
+/// 1 Mb accumulator (drives karyotype + CNV, as before). When AS is
+/// providing coverage for a run, the caller passes a `BinaryCoverage100k`
+/// via `cov100k` so the 100 kb whole-genome track is built from the same
+/// reads — without this, the viewer's coverage panel showed the *main*
+/// BAM's read distribution while every karyotype/CNV number was computed
+/// off the AS BAM.
+///
+/// # Read-name dedup
+///
+/// MinKNOW's live adaptive-sampling BAM stream re-emits the *same read*
+/// multiple times, each time with FLAG 0 (a spec-violating "second
+/// primary"). Counting every occurrence inflates coverage 2–5× on
+/// re-emitted reads. We keep only the first sighting of each read name;
+/// later sightings are skipped for every downstream accumulator.
+///
+/// The dedup table is a `HashSet<String>` sized to the AS BAM's unique
+/// read count. On a typical AS run (~100 k unique reads, ONT UUID names
+/// ~36 B each) that's a few MB — negligible next to the pipeline's other
+/// scans. Memory scales linearly with unique reads.
 pub fn scan_as_alignments_with_gc(
     path: &str,
     bam_header: &AlignmentHeader,
@@ -544,6 +564,7 @@ pub fn scan_as_alignments_with_gc(
     ref_path: Option<&str>,
     gc_bins: Option<&GcBinMap>,
     contigs: &[Contig],
+    mut cov100k: Option<&mut crate::var::coverage_binary::BinaryCoverage100k>,
 ) -> Result<CoverageAccumulator, Box<dyn std::error::Error>>
 {
     info!("Scanning adaptive sampling alignments: {}", path);
@@ -555,20 +576,45 @@ pub fn scan_as_alignments_with_gc(
 
     let mut accumulator = CoverageAccumulator::new_with_gc(bam_header, repeats, ref_path, gc_bins, contigs);
 
+    // First-sighting-wins dedup table for AS re-emit. Records without a
+    // read name pass through (nothing to key on); this is rare enough in
+    // practice that inflating them by a factor of ~1 is preferable to
+    // dropping them entirely.
+    let mut seen: HashSet<String> = HashSet::new();
     let mut count = 0u64;
+    let mut duplicates = 0u64;
     while let Some(record) = input.read_record()? {
-        accumulator.process(&record);
         count += 1;
         if count.is_multiple_of(100_000) {
             eprint!("\rAS alignments: {} records...", count);
             std::io::Write::flush(&mut std::io::stderr())?;
         }
+
+        // First-sighting-wins: skip re-emitted reads. `insert` returns
+        // false when the name was already present.
+        if let Some(name) = record.name()
+            && !seen.insert(name.to_string())
+        {
+            duplicates += 1;
+            continue;
+        }
+
+        accumulator.process(&record);
+        if let Some(c) = cov100k.as_deref_mut() { c.process(&record); }
     }
     if count >= 100_000 {
         eprintln!();
     }
 
-    info!("AS alignments: processed {} records from {}", count, path);
+    let unique = count - duplicates;
+    if duplicates > 0 {
+        info!(
+            "AS alignments: processed {} records from {} ({} unique, {} duplicate names skipped)",
+            count, path, unique, duplicates,
+        );
+    } else {
+        info!("AS alignments: processed {} records from {}", count, path);
+    }
     Ok(accumulator)
 }
 

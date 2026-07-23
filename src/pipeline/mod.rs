@@ -179,7 +179,16 @@ impl<'a> PipelineRunner<'a> {
         // pass and indexes by `pos / BIN_SIZE`. Sidesteps the karyotype
         // accumulator entirely so we don't perturb the 1 Mb pipeline it
         // depends on.
-        let mut cov100k_acc = crate::var::coverage_binary::BinaryCoverage100k::new(&header);
+        //
+        // When adaptive-sampling alignments are the coverage source
+        // (`--as-alignments`), the AS BAM is the authoritative read set --
+        // the main BAM is typically pre-enrichment or empty. Feeding the
+        // main BAM into this accumulator would show wildly different
+        // coverage in the viewer than the karyotype/CNV numbers computed
+        // from AS; leave it `None` here and fill it in during the AS scan
+        // below.
+        let mut cov100k_acc = (!use_as_for_coverage)
+            .then(|| crate::var::coverage_binary::BinaryCoverage100k::new(&header));
 
 
         // Main Loop
@@ -213,38 +222,44 @@ impl<'a> PipelineRunner<'a> {
             if let Some(q) = &mut qc_acc {
                 q.process(&record);
             }
-            cov100k_acc.process(&record);
+            if let Some(c) = &mut cov100k_acc { c.process(&record); }
         }
         info!("Processed {} reads. Done.", i);
-
-        // Write the 100 kb binary track once pass-1 is done. Failure here is
-        // a warning, not a hard error -- the file is a viewer convenience and
-        // the pipeline's variant/karyotype outputs don't depend on it.
-        let cov100k_path = format!("{}.coverage_100k.bin", self.out_prefix);
-        if let Err(e) = cov100k_acc.write(&cov100k_path) {
-            log::warn!("[coverage-100k] failed to write {}: {}", cov100k_path, e);
-        }
 
         // Pass-1 stream is done. If we were building an inline BAI, finalize
         // it now so the subsequent random-access stages can query.
         bam.finalize_inline_index()?;
 
         // Adaptive sampling coverage scan (replaces main BAM for coverage and reads_aligned).
-        // The AS path still writes its own TSV here -- it doesn't feed the
-        // karyotype step and no in-memory hand-off is needed.
+        // We also build the 100 kb viewer track from the AS BAM here -- see
+        // the comment on `cov100k_acc` above for why.
         let as_reads_aligned: Option<u64> = if let Some(ref as_path) = self.as_alignments
             && let Some(reps) = &self.coverage_repeats
         {
             use crate::var::coverage::scan_as_alignments_with_gc;
             info!("Scanning adaptive sampling alignments for coverage...");
+            let mut as_cov100k = crate::var::coverage_binary::BinaryCoverage100k::new(&header);
             let as_acc = scan_as_alignments_with_gc(
                 as_path, &header, reps, self.ref_path.as_deref(), self.gc_bins.as_ref(), &contigs,
+                Some(&mut as_cov100k),
             )?;
             as_acc.write_output(&format!("{}.coverage.tsv", self.out_prefix), true)?;
+            cov100k_acc = Some(as_cov100k);
             Some(as_acc.reads_aligned())
         } else {
             None
         };
+
+        // Write the 100 kb binary track. Filled from either pass 1 (main
+        // BAM, above) or the AS scan (just now). Failure is a warning, not a
+        // hard error -- the file is a viewer convenience and the pipeline's
+        // variant/karyotype outputs don't depend on it.
+        if let Some(acc) = &cov100k_acc {
+            let cov100k_path = format!("{}.coverage_100k.bin", self.out_prefix);
+            if let Err(e) = acc.write(&cov100k_path) {
+                log::warn!("[coverage-100k] failed to write {}: {}", cov100k_path, e);
+            }
+        }
 
         // Main-BAM coverage: hand bins to the caller in memory. The karyotype
         // step is what writes the unified `.coverage.tsv` (raw + gc-adjusted
