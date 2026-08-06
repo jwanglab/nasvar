@@ -465,6 +465,23 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_dept
     Ok(bafs)
 }
 
+/// Median of an already-sorted slice.
+///
+/// Averages the two middle values on an even count. Every arm median in the
+/// pipeline goes through here -- the coverage plot's red line included -- so
+/// what is drawn is the same number that drives the copy-number call.
+pub fn median_sorted(sorted: &[f64]) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
 fn quantile(data: &[f64], q: f64) -> f64 {
     if data.is_empty() {
         return 0.0;
@@ -635,13 +652,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         let mut v = vals.clone();
         v.sort_by(|a, b| a.total_cmp(b));
         if !v.is_empty() {
-            let mid = v.len() / 2;
-            let median = if v.len() % 2 == 0 {
-                (v[mid - 1] + v[mid]) / 2.0
-            } else {
-                v[mid]
-            };
-            medians.insert(chr.clone(), median);
+            medians.insert(chr.clone(), median_sorted(&v));
         }
     }
 
@@ -919,13 +930,7 @@ pub fn call_karyotype_from_bins(
         let mut v = vals.clone();
         v.sort_by(|a, b| a.total_cmp(b));
         if !v.is_empty() {
-            let mid = v.len() / 2;
-            let median = if v.len() % 2 == 0 {
-                (v[mid - 1] + v[mid]) / 2.0
-            } else {
-                v[mid]
-            };
-            medians.insert(chr.clone(), median);
+            medians.insert(chr.clone(), median_sorted(&v));
         }
     }
 
@@ -2044,5 +2049,29 @@ mod tests {
     fn empty_levels_fall_back_to_unit_scale() {
         let ((cn1, cn2, cn3), _) = resolve(&[], &[]);
         assert_eq!((cn1, cn2, cn3), (1.0, 2.0, 3.0));
+    }
+}
+
+#[cfg(test)]
+mod median_tests {
+    use super::median_sorted;
+
+    #[test]
+    fn odd_count_takes_the_middle_value() {
+        assert_eq!(median_sorted(&[1.0, 2.0, 3.0]), 2.0);
+        assert_eq!(median_sorted(&[5.0]), 5.0);
+    }
+
+    #[test]
+    fn even_count_averages_the_two_middle_values() {
+        // The old plot code returned 3.0 here (the upper middle); the karyotype
+        // returned 2.5. All four call sites now agree on 2.5.
+        assert_eq!(median_sorted(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+        assert_eq!(median_sorted(&[10.0, 20.0]), 15.0);
+    }
+
+    #[test]
+    fn empty_slice_is_zero() {
+        assert_eq!(median_sorted(&[]), 0.0);
     }
 }
