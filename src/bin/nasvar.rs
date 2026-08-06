@@ -139,6 +139,9 @@ enum Commands {
         /// Path to enriched regions BED file (used with --sites to check MAF data sufficiency and filter the BAF plot to enriched regions only).
         #[arg(long)]
         enriched: Option<String>,
+        /// Path to repeat-masked regions BED file (used with --sites to exclude repeat-masked sites from the MAF data sufficiency check).
+        #[arg(long)]
+        repeats: Option<String>,
         /// Prefix for output files.
         #[arg(long, required = true)]
         out_prefix: String,
@@ -606,6 +609,7 @@ fn main() {
             maf,
             sites,
             enriched,
+            repeats,
             out_prefix,
             force,
             config,
@@ -646,10 +650,17 @@ fn main() {
                         Ok(v) => v,
                         Err(err) => { error!("Error reading enriched BED {}: {}", e, err); return; }
                     };
-                    let s_vec = match read_sites(s, &ref_config.contigs) {
+                    let mut s_vec = match read_sites(s, &ref_config.contigs) {
                         Ok(v) => v,
                         Err(err) => { error!("Error reading sites {}: {}", s, err); return; }
                     };
+                    if let Some(repeats_path) = repeats {
+                        let r_vec = match read_bed(repeats_path) {
+                            Ok(v) => v,
+                            Err(err) => { error!("Error reading repeats BED {}: {}", repeats_path, err); return; }
+                        };
+                        filter_repeat_sites(&mut s_vec, &r_vec, &ref_config.contigs);
+                    }
                     let sb = nasvar::karyotype::compute_seg_bases(&s_vec, &e_vec, &ref_config);
                     (Some(sb), Some(e_vec))
                 }
