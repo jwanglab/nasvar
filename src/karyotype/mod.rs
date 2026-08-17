@@ -872,19 +872,6 @@ pub fn compute_seg_bases(
     seg_counts
 }
 
-/// reads the coverage TSV from a path, then delegates to the in-memory `_from_bins` variant
-pub fn call_karyotype(
-    cov_path: &str,
-    maf_path: Option<&str>,
-    reads_aligned: Option<u64>,
-    ref_config: &ReferenceConfig,
-    thresholds: &KaryotypeThresholds,
-    seg_bases: Option<&HashMap<String, usize>>,
-) -> Result<KaryotypeOutput, Box<dyn std::error::Error>> {
-    let bins = parse_coverage(cov_path)?;
-    call_karyotype_from_bins(&bins, maf_path, reads_aligned, ref_config, thresholds, seg_bases)
-}
-
 pub fn call_karyotype_from_bins(
     bins: &[CoverageBin],
     maf_path: Option<&str>,
