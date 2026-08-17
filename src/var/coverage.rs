@@ -84,6 +84,125 @@ fn lookup_gc_bins(gc: &GcBinMap, mapped_name: &str, n_bins: usize) -> Vec<f32> {
     out
 }
 
+/// Per-bin GC fraction over `seq` (uppercase or lowercase bases). When `mask`
+/// is `Some`, positions where the bit is set are excluded (repeat-masked);
+/// `None` counts every position. Bins with no A/T/G/C bases (all-N or fully
+/// masked) yield `NaN`. Kept free of FASTA I/O so it can be unit-tested on a
+/// synthetic sequence — this is the GC math that must run regardless of
+/// whether repeat data is present.
+fn gc_fraction_per_bin(
+    seq: &[u8],
+    len: usize,
+    n_bins: usize,
+    bin_size: usize,
+    mask: Option<&BitVec>,
+) -> Vec<f32> {
+    let mut gc_content = Vec::with_capacity(n_bins);
+    for i in 0..n_bins {
+        let start = i * bin_size;
+        let end = std::cmp::min((i + 1) * bin_size, len);
+        let mut gc = 0u32;
+        let mut at = 0u32;
+        for pos in start..end {
+            // A lightweight/absent mask leaves every position unmasked; a
+            // position past the mask's end is treated as unmasked too.
+            if let Some(m) = mask
+                && pos < m.len()
+                && m[pos] {
+                    continue;
+                }
+            if pos < seq.len() {
+                match seq[pos] | 0x20 {
+                    // lowercase
+                    b'g' | b'c' => gc += 1,
+                    b'a' | b't' => at += 1,
+                    _ => {} // N or other ambiguous bases
+                }
+            }
+        }
+        let total = gc + at;
+        if total > 0 {
+            gc_content.push(gc as f32 / total as f32);
+        } else {
+            gc_content.push(f32::NAN);
+        }
+    }
+    gc_content
+}
+
+/// Result of mapping a repeats BED onto the reference's contig naming.
+struct RepeatsMapStats {
+    /// Repeat intervals keyed by chr-normalized contig name.
+    map: HashMap<String, Vec<(usize, usize)>>,
+    /// Total number of regions in the input BED.
+    total_regions: usize,
+    /// Number of regions whose normalized name matches a reference contig.
+    mapped_regions: usize,
+}
+
+/// Build a repeats map keyed by chr-normalized contig name (so a BED using
+/// `1`, `chr1`, or an accession all resolve to the same key the coverage
+/// lookup uses). `known_contigs` holds the normalized reference contig names
+/// so callers can detect a BED whose names don't match the reference.
+fn build_normalized_repeats_map(
+    repeats: &[BedRegion],
+    mapper: &ContigMapper,
+    known_contigs: &HashSet<String>,
+) -> RepeatsMapStats {
+    let mut map: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    let mut mapped_regions = 0;
+    for r in repeats {
+        let key = mapper.to_chr_name(&r.segment);
+        if known_contigs.contains(&key) {
+            mapped_regions += 1;
+        }
+        map.entry(key)
+            .or_default()
+            .push((r.start as usize, r.end as usize));
+    }
+    RepeatsMapStats { map, total_regions: repeats.len(), mapped_regions }
+}
+
+/// Verdict on a FASTA-based GC scan, used to surface silent failures where
+/// the FASTA is present but produces no usable GC (a contig-naming mismatch
+/// between the alignment/reference config and the FASTA index, or an index
+/// that couldn't be opened).
+#[derive(Debug, PartialEq, Eq)]
+enum GcScanOutcome {
+    /// GC either wasn't scanned from the FASTA, or produced finite values.
+    Ok,
+    /// A FASTA was given but its index couldn't be opened.
+    ReaderUnavailable,
+    /// The FASTA opened, bins exist, but no contig yielded any finite GC —
+    /// almost always a `.fai`-vs-alignment contig-naming mismatch.
+    NoContigResolved,
+}
+
+/// Classify the result of GC computation so the caller can warn loudly when
+/// a supplied FASTA silently contributed nothing. Only meaningful when GC was
+/// meant to come from the FASTA (`ref_path_given && !used_gc_bins`).
+fn assess_fasta_gc_scan(
+    ref_path_given: bool,
+    used_gc_bins: bool,
+    reader_opened: bool,
+    total_bins: usize,
+    finite_gc_bins: usize,
+) -> GcScanOutcome {
+    // GC wasn't sourced from the FASTA (no reference, or a pre-computed table
+    // was used) — nothing to diagnose here.
+    if !ref_path_given || used_gc_bins {
+        return GcScanOutcome::Ok;
+    }
+    if !reader_opened {
+        return GcScanOutcome::ReaderUnavailable;
+    }
+    // Opened and there were bins to fill, yet none resolved to a finite value.
+    if total_bins > 0 && finite_gc_bins == 0 {
+        return GcScanOutcome::NoContigResolved;
+    }
+    GcScanOutcome::Ok
+}
+
 impl CoverageAccumulator {
     /// Create new accumulator with repeat masks and optional GC content.
     pub fn new(header: &AlignmentHeader, repeats: &[BedRegion], ref_path: Option<&str>, contigs: &[Contig]) -> Self {
@@ -104,16 +223,49 @@ impl CoverageAccumulator {
     ) -> Self {
         info!("Initializing coverage accumulator...");
         let bin_size = 1_000_000;
-        let mut repeats_map: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+        let mapper = ContigMapper::from_contigs(contigs);
 
-        for r in repeats {
-            repeats_map
-                .entry(r.segment.clone())
-                .or_default()
-                .push((r.start as usize, r.end as usize));
+        // Normalize repeats-BED contig names into the same chr-style space the
+        // per-chromosome lookup uses, so a BED written with `1`, `chr1`, or an
+        // accession all match. `known_contigs` are the reference contigs
+        // present in this BAM header (normalized), used to flag a BED whose
+        // names don't line up with the reference at all.
+        let known_contigs: HashSet<String> =
+            header.refs.iter().map(|n| mapper.to_chr_name(n)).collect();
+        let repeats_stats = build_normalized_repeats_map(repeats, &mapper, &known_contigs);
+
+        // A missing or mis-named repeats BED must not fail silently: it only
+        // disables repeat masking (coverage/karyotype still run, and GC
+        // correction now proceeds regardless — see the GC step below), so we
+        // warn loudly rather than error.
+        if repeats_stats.total_regions == 0 {
+            warn!(
+                "[coverage] repeats BED contained no usable regions (empty or comment-only); \
+                 repeat masking is disabled"
+            );
+        } else if repeats_stats.mapped_regions == 0 {
+            let example_acc = contigs
+                .first()
+                .map(|c| c.accession.as_str())
+                .unwrap_or("NC_000001.11");
+            warn!(
+                "[coverage] none of {} repeats-BED regions matched any reference contig — \
+                 check the BED's contig naming (e.g. 'chr1' vs '1' vs accession '{}'); \
+                 repeat masking is disabled",
+                repeats_stats.total_regions, example_acc
+            );
+        } else if repeats_stats.mapped_regions < repeats_stats.total_regions {
+            warn!(
+                "[coverage] {} of {} repeats-BED regions did not match any reference contig \
+                 and will be ignored (check contig naming)",
+                repeats_stats.total_regions - repeats_stats.mapped_regions,
+                repeats_stats.total_regions
+            );
         }
 
-        // Build set of chromosomes that have repeats (we only need to mask those)
+        let repeats_map = repeats_stats.map;
+        // Chromosomes we build a repeat mask for. Unmatched BED keys can't
+        // equal any normalized reference name, so they're harmless here.
         let chroms_with_repeats: HashSet<&String> = repeats_map.keys().collect();
 
         // Open indexed FASTA reader for GC content calculation
@@ -129,8 +281,15 @@ impl CoverageAccumulator {
             ContigMapper::from_fai(&fai_path, contigs).ok()
         });
 
+        // Track whether FASTA-based GC actually produced anything, so a
+        // reference that silently contributes no GC (unopenable index, or a
+        // contig-naming mismatch) surfaces as a warning rather than only a
+        // downstream "insufficient data points" failure.
+        let reader_opened = fasta_reader.is_some();
+        let mut total_gc_bins = 0usize;
+        let mut finite_gc_bins = 0usize;
+
         let mut chroms = Vec::with_capacity(header.refs.len());
-        let mapper = ContigMapper::from_contigs(contigs);
 
         for (idx, (name, len)) in header.refs.iter().zip(header.lengths.iter()).enumerate() {
             let len = *len as usize;
@@ -141,13 +300,14 @@ impl CoverageAccumulator {
 
             let mapped_name = mapper.to_chr_name(name);
 
-            // Only create full mask for chromosomes with repeats
-            // Others get a lightweight entry (no mask, assume all unmasked)
+            // A full repeat mask is built only for chromosomes present in the
+            // repeats BED; others stay unmasked (lightweight minimal mask that
+            // process() treats as all-unmasked).
             let has_repeats = chroms_with_repeats.contains(&mapped_name);
 
             let n_bins = len.div_ceil(bin_size);
 
-            if has_repeats {
+            let (mask, bin_unmasked_counts): (BitVec, Vec<u32>) = if has_repeats {
                 debug!("Processing chromosome {} ({}/{})...", name, idx + 1, header.refs.len());
 
                 let mut mask = bitvec![0; len + 1];
@@ -163,8 +323,8 @@ impl CoverageAccumulator {
                     }
                 }
 
-                let mut bin_unmasked_counts = vec![0u32; n_bins];
-                for (i, bin_count) in bin_unmasked_counts.iter_mut().enumerate() {
+                let mut counts = vec![0u32; n_bins];
+                for (i, bin_count) in counts.iter_mut().enumerate() {
                     let start = i * bin_size;
                     let end = std::cmp::min((i + 1) * bin_size, len);
                     let mut count = 0;
@@ -175,54 +335,72 @@ impl CoverageAccumulator {
                     }
                     *bin_count = count;
                 }
-
-                // Per-bin GC content: prefer pre-computed table if supplied
-                // (exact bin-level GC from a full reference), otherwise scan
-                // the FASTA. The table is keyed by (mapped_name, bin_index).
-                let bin_gc_content = if let Some(gc) = gc_bins {
-                    lookup_gc_bins(gc, &mapped_name, n_bins)
-                } else {
-                    Self::compute_gc_content(
-                        &mut fasta_reader, name, fasta_mapper.as_ref(), len, n_bins, bin_size, &mask,
-                    )
-                };
-
-                chroms.push(Some(ChromData {
-                    mapped_name,
-                    len,
-                    mask,
-                    bin_read_counts: vec![0u32; n_bins],
-                    bin_unmasked_counts,
-                    bin_gc_content,
-                }));
+                (mask, counts)
             } else {
-                // No repeats for this chromosome - use lightweight initialization
-                // All positions are unmasked, bin_unmasked_counts = bin_size for each bin
-                let bin_unmasked_counts: Vec<u32> = (0..n_bins)
+                // No repeats: all positions unmasked, so each bin's unmasked
+                // count is simply its base span.
+                let counts: Vec<u32> = (0..n_bins)
                     .map(|i| {
                         let start = i * bin_size;
                         let end = std::cmp::min((i + 1) * bin_size, len);
                         (end - start) as u32
                     })
                     .collect();
+                // Minimal mask - handled specially in process().
+                (bitvec![0; 1], counts)
+            };
 
-                // GC: table lookup if supplied; otherwise NaN (no repeats means
-                // we skipped GC-from-FASTA for speed — same as before).
-                let bin_gc_content = if let Some(gc) = gc_bins {
-                    lookup_gc_bins(gc, &mapped_name, n_bins)
-                } else {
-                    vec![f32::NAN; n_bins]
-                };
+            // GC content is computed for EVERY chromosome, independent of
+            // whether repeat data is present: prefer the pre-computed table,
+            // otherwise scan the FASTA. Repeat-masked positions are excluded
+            // from GC only when a real mask exists (has_repeats). This is what
+            // lets GC correction proceed even when the repeats BED is missing
+            // or mis-named. The table is keyed by (mapped_name, bin_index).
+            let bin_gc_content = if let Some(gc) = gc_bins {
+                lookup_gc_bins(gc, &mapped_name, n_bins)
+            } else {
+                let mask_opt = if has_repeats { Some(&mask) } else { None };
+                Self::compute_gc_content(
+                    &mut fasta_reader, name, fasta_mapper.as_ref(), len, n_bins, bin_size, mask_opt,
+                )
+            };
 
-                chroms.push(Some(ChromData {
-                    mapped_name,
-                    len,
-                    mask: bitvec![0; 1], // minimal mask - we'll handle specially in process()
-                    bin_read_counts: vec![0u32; n_bins],
-                    bin_unmasked_counts,
-                    bin_gc_content,
-                }));
-            }
+            total_gc_bins += bin_gc_content.len();
+            finite_gc_bins += bin_gc_content.iter().filter(|v| !v.is_nan()).count();
+
+            chroms.push(Some(ChromData {
+                mapped_name,
+                len,
+                mask,
+                bin_read_counts: vec![0u32; n_bins],
+                bin_unmasked_counts,
+                bin_gc_content,
+            }));
+        }
+
+        // Diagnose a FASTA that was supplied but contributed no GC.
+        match assess_fasta_gc_scan(
+            ref_path.is_some(),
+            gc_bins.is_some(),
+            reader_opened,
+            total_gc_bins,
+            finite_gc_bins,
+        ) {
+            GcScanOutcome::ReaderUnavailable => warn!(
+                "[coverage] could not open FASTA index for GC computation (reference '{}', \
+                 expected index '{}.fai'); GC correction will be skipped",
+                ref_path.unwrap_or("<none>"),
+                ref_path.unwrap_or("<none>"),
+            ),
+            GcScanOutcome::NoContigResolved => warn!(
+                "[coverage] FASTA '{}' opened but no contig produced GC values — almost \
+                 certainly a contig-naming mismatch between the alignment/reference config \
+                 and the FASTA index (check that '{}.fai' sequence names match the BAM/config, \
+                 e.g. 'chr1' vs '1' vs accession); GC correction will be skipped",
+                ref_path.unwrap_or("<none>"),
+                ref_path.unwrap_or("<none>"),
+            ),
+            GcScanOutcome::Ok => {}
         }
 
         info!("Coverage accumulator initialized.");
@@ -240,7 +418,7 @@ impl CoverageAccumulator {
         len: usize,
         n_bins: usize,
         bin_size: usize,
-        mask: &BitVec,
+        mask: Option<&BitVec>,
     ) -> Vec<f32> {
         let reader = match fasta_reader.as_mut() {
             Some(r) => r,
@@ -271,33 +449,7 @@ impl CoverageAccumulator {
             }
         };
         let seq = record.sequence().as_ref();
-
-        let mut gc_content = Vec::with_capacity(n_bins);
-        for i in 0..n_bins {
-            let start = i * bin_size;
-            let end = std::cmp::min((i + 1) * bin_size, len);
-            let mut gc = 0u32;
-            let mut at = 0u32;
-            for pos in start..end {
-                if mask[pos] {
-                    continue;
-                }
-                if pos < seq.len() {
-                    match seq[pos] | 0x20 {  // lowercase
-                        b'g' | b'c' => gc += 1,
-                        b'a' | b't' => at += 1,
-                        _ => {} // N or other ambiguous bases
-                    }
-                }
-            }
-            let total = gc + at;
-            if total > 0 {
-                gc_content.push(gc as f32 / total as f32);
-            } else {
-                gc_content.push(f32::NAN);
-            }
-        }
-        gc_content
+        gc_fraction_per_bin(seq, len, n_bins, bin_size, mask)
     }
 
     /// Process a single record - called per-record during BAM scan.
@@ -681,6 +833,173 @@ mod tests {
         assert!((back[0].gc_content.unwrap() - 0.412).abs() < 1e-4);
         assert_eq!(back[1].coverage, 42.0);
         assert!(back[1].gc_content.is_none());     // "NA" → None
+    }
+
+    // ---- gc_fraction_per_bin: GC math must work with or without a mask ----
+
+    #[test]
+    fn gc_fraction_computes_per_bin_without_mask() {
+        // "GGCC" -> 100% GC, "AATT" -> 0% GC
+        let out = gc_fraction_per_bin(b"GGCCAATT", 8, 2, 4, None);
+        assert_eq!(out.len(), 2);
+        assert!((out[0] - 1.0).abs() < 1e-6);
+        assert!((out[1] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gc_fraction_excludes_masked_positions() {
+        // seq "GATC": G,A,T,C. Mask positions 2 (T) and 3 (C); remaining
+        // counted bases are G and A -> gc=1, at=1 -> 0.5.
+        let mut mask = bitvec![0; 4];
+        mask.set(2, true);
+        mask.set(3, true);
+        let out = gc_fraction_per_bin(b"GATC", 4, 1, 4, Some(&mask));
+        assert_eq!(out.len(), 1);
+        assert!((out[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn gc_fraction_all_ambiguous_bin_is_nan() {
+        let out = gc_fraction_per_bin(b"NNNN", 4, 1, 4, None);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].is_nan());
+    }
+
+    // ---- build_normalized_repeats_map: name normalization + match stats ----
+
+    fn test_contigs() -> Vec<Contig> {
+        vec![
+            Contig { name: "chr1".into(), accession: "NC_000001.11".into() },
+            Contig { name: "chr2".into(), accession: "NC_000002.12".into() },
+        ]
+    }
+
+    fn region(segment: &str) -> BedRegion {
+        BedRegion { segment: segment.into(), start: 0, end: 100, name: segment.into() }
+    }
+
+    #[test]
+    fn repeats_map_normalizes_short_and_accession_names() {
+        let contigs = test_contigs();
+        let mapper = ContigMapper::from_contigs(&contigs);
+        let known: HashSet<String> = contigs.iter().map(|c| c.name.clone()).collect();
+        let repeats = vec![region("1"), region("NC_000002.12")];
+        let stats = build_normalized_repeats_map(&repeats, &mapper, &known);
+        assert!(stats.map.contains_key("chr1")); // short "1" -> "chr1"
+        assert!(stats.map.contains_key("chr2")); // accession -> "chr2"
+        assert_eq!(stats.total_regions, 2);
+        assert_eq!(stats.mapped_regions, 2);
+    }
+
+    #[test]
+    fn repeats_map_flags_unmapped_names() {
+        let contigs = test_contigs();
+        let mapper = ContigMapper::from_contigs(&contigs);
+        let known: HashSet<String> = contigs.iter().map(|c| c.name.clone()).collect();
+        let stats = build_normalized_repeats_map(&[region("contig_xyz")], &mapper, &known);
+        assert_eq!(stats.total_regions, 1);
+        assert_eq!(stats.mapped_regions, 0); // name matches no reference contig
+    }
+
+    #[test]
+    fn repeats_map_empty_input_has_zero_regions() {
+        let contigs = test_contigs();
+        let mapper = ContigMapper::from_contigs(&contigs);
+        let known: HashSet<String> = contigs.iter().map(|c| c.name.clone()).collect();
+        let stats = build_normalized_repeats_map(&[], &mapper, &known);
+        assert_eq!(stats.total_regions, 0);
+        assert_eq!(stats.mapped_regions, 0);
+        assert!(stats.map.is_empty());
+    }
+
+    // ---- assess_fasta_gc_scan: surface silent FASTA-GC failures ----
+
+    #[test]
+    fn gc_scan_ok_when_finite_values_produced() {
+        // FASTA scanned, some bins resolved.
+        let out = assess_fasta_gc_scan(true, false, true, 10, 7);
+        assert_eq!(out, GcScanOutcome::Ok);
+    }
+
+    #[test]
+    fn gc_scan_flags_reader_unavailable() {
+        // Reference given but the index couldn't be opened.
+        let out = assess_fasta_gc_scan(true, false, false, 0, 0);
+        assert_eq!(out, GcScanOutcome::ReaderUnavailable);
+    }
+
+    #[test]
+    fn gc_scan_flags_no_contig_resolved() {
+        // FASTA opened, bins existed, but nothing resolved — naming mismatch.
+        let out = assess_fasta_gc_scan(true, false, true, 10, 0);
+        assert_eq!(out, GcScanOutcome::NoContigResolved);
+    }
+
+    #[test]
+    fn gc_scan_ok_when_gc_bins_used() {
+        // Pre-computed table path is not diagnosed here even if empty.
+        let out = assess_fasta_gc_scan(true, true, true, 10, 0);
+        assert_eq!(out, GcScanOutcome::Ok);
+    }
+
+    #[test]
+    fn gc_scan_ok_when_no_reference() {
+        let out = assess_fasta_gc_scan(false, false, false, 0, 0);
+        assert_eq!(out, GcScanOutcome::Ok);
+    }
+
+    #[test]
+    fn gc_scan_ok_when_no_bins_to_fill() {
+        // Reader opened but header had no usable contigs — nothing to warn about.
+        let out = assess_fasta_gc_scan(true, false, true, 0, 0);
+        assert_eq!(out, GcScanOutcome::Ok);
+    }
+
+    // ---- end-to-end: GC correction proceeds with NO repeats provided ----
+
+    #[test]
+    fn gc_content_populated_when_no_repeats_provided() {
+        // Regression guard for the decoupling fix: previously a chromosome
+        // absent from the repeats BED got NaN GC (→ None), starving GC
+        // correction. Now GC is scanned from the FASTA regardless of repeats.
+        //
+        // The chromosome must exceed to_bins()'s 25%-of-bin_size unmasked
+        // threshold (250 kb) to survive, so use a 300 kb all-GC sequence.
+        let seq_len = 300_000usize;
+        let seq: String = std::iter::repeat_n("GC", seq_len / 2).collect();
+
+        let base = std::env::temp_dir()
+            .join(format!("nasvar_gc_norep_{}.fa", std::process::id()));
+        let fa = base.to_string_lossy().into_owned();
+        let fai = format!("{}.fai", fa);
+        // Single-line FASTA: sequence starts after ">chr1\n" (6 bytes).
+        std::fs::write(&fa, format!(">chr1\n{}\n", seq)).unwrap();
+        std::fs::write(
+            &fai,
+            format!("chr1\t{}\t6\t{}\t{}\n", seq_len, seq_len, seq_len + 1),
+        )
+        .unwrap();
+
+        let header = AlignmentHeader {
+            text: String::new(),
+            refs: vec!["chr1".to_string()],
+            lengths: vec![seq_len as i32],
+        };
+        let contigs = vec![Contig {
+            name: "chr1".into(),
+            accession: "NC_000001.11".into(),
+        }];
+
+        // No repeats at all.
+        let acc = CoverageAccumulator::new(&header, &[], Some(&fa), &contigs);
+        let bins = acc.to_bins();
+
+        std::fs::remove_file(&fa).ok();
+        std::fs::remove_file(&fai).ok();
+
+        assert_eq!(bins.len(), 1, "300 kb bin should survive the unmasked-fraction filter");
+        let gc = bins[0].gc_content.expect("GC must be computed even without repeats");
+        assert!((gc - 1.0).abs() < 1e-6, "all-GC sequence should read as 1.0, got {gc}");
     }
 }
 

@@ -2,6 +2,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 
 use flate2::read::MultiGzDecoder;
+use log::warn;
+
+use crate::utils::contig::ContigMapper;
 
 #[derive(Debug, Clone)]
 pub struct BedRegion {
@@ -9,6 +12,35 @@ pub struct BedRegion {
     pub start: u32,
     pub end: u32,
     pub name: String,
+}
+
+/// Drop BED regions whose contig is absent from the alignment header (checked
+/// via the `ContigMapper`, which understands chr<->accession translation),
+/// logging a strong warning naming the skipped genes.
+///
+/// This guards against a BED built for a different assembly (patch/alt/unplaced
+/// contigs, or a version mismatch): such regions would otherwise be silently
+/// dropped by some stages and hard-abort others (a region query on a contig not
+/// in the header errors). Returns the regions that ARE present in the alignment.
+pub fn filter_regions_present_in_bam(
+    regions: Vec<BedRegion>,
+    mapper: &ContigMapper,
+    label: &str,
+) -> Vec<BedRegion> {
+    let (kept, dropped): (Vec<BedRegion>, Vec<BedRegion>) =
+        regions.into_iter().partition(|r| mapper.exists_in_bam(&r.segment));
+    if !dropped.is_empty() {
+        let names: Vec<String> = dropped
+            .iter()
+            .map(|r| format!("{} [{}]", r.name, r.segment))
+            .collect();
+        warn!(
+            "{}: {} region(s) reference a contig ABSENT from the alignment and will be SKIPPED (not assessed) \
+             — verify the BED matches the reference assembly the BAM was aligned to: {}",
+            label, dropped.len(), names.join(", ")
+        );
+    }
+    kept
 }
 
 pub fn read_bed(bed_path: &str) -> Result<Vec<BedRegion>, Box<dyn std::error::Error>> {

@@ -9,7 +9,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use nasvar::config::{Contig, PipelineConfig, ReferenceConfig};
 use nasvar::input::AlignmentInput;
 use nasvar::output::{OutputCollector, UnifiedOutput};
-use nasvar::utils::bed::read_bed;
+use nasvar::utils::bed::{read_bed, filter_regions_present_in_bam};
 use nasvar::var::cnv::{call_cnvs, CnvCallParams};
 use nasvar::var::coverage::read_depth;
 use nasvar::var::fusions::{call_fusions, FusionCallParams};
@@ -571,6 +571,7 @@ fn main() {
                     return;
                 }
             };
+            let t_vec = filter_regions_present_in_bam(t_vec, &br.contig_mapper, "targets BED");
             // Try to load karyotype from output
             let unified_path = format!("{}.result.json", out_prefix);
             let karyo_data = if std::path::Path::new(&unified_path).exists() {
@@ -714,6 +715,7 @@ fn main() {
                     return;
                 }
             };
+            let t_vec = filter_regions_present_in_bam(t_vec, &br.contig_mapper, "targets BED");
             // Note: --repeats is accepted but not used by fusion calling (kept for CLI compat).
             // Ambiguous alignments are now detected via query-coordinate overlap instead.
             let _r_vec = match read_bed(repeats) {
@@ -971,6 +973,7 @@ fn main() {
                     return;
                 }
             };
+            let t_vec = filter_regions_present_in_bam(t_vec, &br.contig_mapper, "targets BED");
 
             // Load pipeline config
             let pipeline_config = match PipelineConfig::load(config) {

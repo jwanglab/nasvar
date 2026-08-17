@@ -231,7 +231,15 @@ fn calculate_focal_depths(
         eprint!("\r  Querying {}/{}: {} ({})...", ti + 1, targets.len(), t.name, region);
         std::io::Write::flush(&mut std::io::stderr()).ok();
 
-        let query = bam.query(&region)?;
+        // Resilient: a region on a contig absent from the BAM header errors here.
+        // Warn and skip that gene instead of aborting the whole CNV stage.
+        let query = match bam.query(&region) {
+            Ok(q) => q,
+            Err(e) => {
+                warn!("CNV focal depth: skipping {} ({}) — region query failed: {}", t.name, region, e);
+                continue;
+            }
+        };
         let mut total_bases = 0;
 
         for result in query {
