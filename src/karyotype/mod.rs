@@ -1,4 +1,5 @@
 mod plot;
+pub mod peakfit;
 
 use log::{info, warn, debug};
 use crate::bam::ContigMapper;
@@ -464,6 +465,23 @@ pub fn parse_maf_for_plot(maf_path: &str, ref_config: &ReferenceConfig, min_dept
     Ok(bafs)
 }
 
+/// Median of an already-sorted slice.
+///
+/// Averages the two middle values on an even count. Every arm median in the
+/// pipeline goes through here -- the coverage plot's red line included -- so
+/// what is drawn is the same number that drives the copy-number call.
+pub fn median_sorted(sorted: &[f64]) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    }
+}
+
 fn quantile(data: &[f64], q: f64) -> f64 {
     if data.is_empty() {
         return 0.0;
@@ -634,13 +652,7 @@ pub fn find_levels(chrom_bins: &HashMap<String, Vec<f64>>) -> Vec<(f64, usize)> 
         let mut v = vals.clone();
         v.sort_by(|a, b| a.total_cmp(b));
         if !v.is_empty() {
-            let mid = v.len() / 2;
-            let median = if v.len() % 2 == 0 {
-                (v[mid - 1] + v[mid]) / 2.0
-            } else {
-                v[mid]
-            };
-            medians.insert(chr.clone(), median);
+            medians.insert(chr.clone(), median_sorted(&v));
         }
     }
 
@@ -776,57 +788,40 @@ fn find_levels_maf(
     levels_maf
 }
 
+/// Call one MAF peak per coverage level by Beta-mixture fitting.
+///
+/// The peak is the crest of the largest-AREA bump in the fitted mixture, which
+/// is what makes a broad balanced peak win over a narrow low-MAF spike. See
+/// [`peakfit`] and `MAF_PEAKFIT_K2_METHOD.txt` for the method.
 fn find_maf_peak(levels_maf: &HashMap<usize, Vec<f64>>) -> HashMap<usize, f64> {
     let mut levels_maf_peak = HashMap::new();
 
     for (&idx, mafs) in levels_maf {
-        if mafs.len() < 10 {
+        let fit = peakfit::fit_level(mafs);
+        let Some(peak) = fit.overall_peak else {
+            debug!("Level {}: too few MAF loci to fit (n={})", idx, fit.n);
             continue;
+        };
+        debug!(
+            "Level {}: n={} BIC-K={}->{} noise={:.3} peak={:.4}{}",
+            idx,
+            fit.n,
+            fit.bic_k,
+            fit.final_k,
+            fit.noise_fraction,
+            peak,
+            if fit.low_confidence { "  [LOW-N]" } else { "" }
+        );
+        for (i, c) in fit.components.iter().enumerate() {
+            debug!(
+                "    component {}: peak={:.4} weight={:.3} concentration={:.1}",
+                i + 1,
+                c.peak,
+                c.weight,
+                c.concentration
+            );
         }
-
-        let mut sorted_mafs = mafs.clone();
-        sorted_mafs.sort_by(|a, b| a.total_cmp(b));
-        let binsize = find_bin_width(&sorted_mafs, Some(0.0), Some(0.25), Some(1.0)).min(0.05); // cap at 0.05
-
-        // Histogram 0.0 to 0.6
-        let num_bins = (0.6 / binsize).ceil() as usize;
-        let mut hist = vec![0; num_bins + 1];
-
-        for &m in mafs {
-            if (0.0..=0.6).contains(&m) {
-                let b = (m / binsize).floor() as usize;
-                if b < hist.len() {
-                    hist[b] += 1;
-                }
-            }
-        }
-
-        let mut peaks = Vec::new(); // (center, count)
-
-        for i in 2..num_bins.saturating_sub(2) {
-            let v = hist[i];
-            if v > hist[i - 1] && v > hist[i - 2] && v > hist[i + 1] && v > hist[i + 2] {
-                let center = (i as f64 * binsize) + (binsize / 2.0);
-                peaks.push((center, v));
-            }
-        }
-
-        if peaks.is_empty() {
-            continue;
-        }
-
-        // Sort by height desc
-        peaks.sort_by(|a, b| b.1.cmp(&a.1));
-        let max_height = peaks[0].1;
-
-        peaks.sort_by(|a, b| b.0.total_cmp(&a.0)); // desc pos
-
-        for p in peaks {
-            if p.1 as f64 > 0.5 * max_height as f64 {
-                levels_maf_peak.insert(idx, p.0);
-                break;
-            }
-        }
+        levels_maf_peak.insert(idx, peak);
     }
 
     levels_maf_peak
@@ -922,13 +917,7 @@ pub fn call_karyotype_from_bins(
         let mut v = vals.clone();
         v.sort_by(|a, b| a.total_cmp(b));
         if !v.is_empty() {
-            let mid = v.len() / 2;
-            let median = if v.len() % 2 == 0 {
-                (v[mid - 1] + v[mid]) / 2.0
-            } else {
-                v[mid]
-            };
-            medians.insert(chr.clone(), median);
+            medians.insert(chr.clone(), median_sorted(&v));
         }
     }
 
@@ -1145,12 +1134,12 @@ pub fn call_karyotype_from_bins(
     let y_med = medians.get("Y").cloned().unwrap_or(0.0);
     let y_in_tumor_cn1_bin = y_med > cn1 - delta / 2.0 && y_med < cn1 + delta / 2.0;
 
-    // Also skip if MAF data confirms the lower level is genuinely diploid (MAF peak > 0.4)
+    // Also skip if MAF data confirms the lower level is genuinely diploid
     // MAF-based karyotype prediction doesn't use hypodiploid adjustment
     let maf_confirms_diploid = levels_maf_peaks
         .as_ref()
         .and_then(|peaks| peaks.get(&0)) // Level 0 is the cn2 level (highest count)
-        .map(|&peak| peak > 0.4)
+        .map(|&peak| peak > thresholds.maf_peak_diploid)
         .unwrap_or(false);
 
     if y_cn == 1 && non_sex_1n_count == 0 && y_in_tumor_cn1_bin && !maf_confirms_diploid {
@@ -1285,6 +1274,17 @@ fn within_segment_spread(chrom_bins: &HashMap<String, Vec<f64>>) -> f64 {
     }
 }
 
+/// Coverage ratio at or above which the two levels are too far apart to be
+/// 2n/3n, so they are read as 1n/2n regardless of what MAF says. Checked
+/// before the MAF peaks are consulted at all.
+const RATIO_1N_2N: f64 = 1.6;
+/// Two MAF peaks this close carry a low-blast-ratio warning: the levels are
+/// hard to tell apart from the allele channel.
+const MAF_PEAK_CLOSE_WARN: f64 = 0.03;
+/// Two MAF peaks this close are a tie -- the allele channel cannot separate
+/// the levels at all, so the coverage ratio decides instead.
+const MAF_PEAK_TIE: f64 = 0.01;
+
 fn resolve_cn_states(
     levels: &[(f64, usize)],
     maf_peaks: Option<&HashMap<usize, f64>>,
@@ -1342,6 +1342,18 @@ fn resolve_cn_states(
         .position(|x| (x.0 - v2).abs() < 0.001)
         .unwrap_or(0);
 
+    // Coverage ratio first: levels this far apart cannot be 2n/3n, so they are
+    // 1n/2n whatever the allele channel says. A high MAF peak on the lower
+    // level in this situation is misleading (typically low blast fraction).
+    let ratio = v2 / v1;
+    if ratio >= RATIO_1N_2N {
+        debug!(
+            "Coverage ratio {:.2} >= {:.2} -> v1=1n, v2=2n (MAF not consulted).",
+            ratio, RATIO_1N_2N
+        );
+        return (v1, v2, v2 + (v2 - v1));
+    }
+
     if let Some(peaks) = maf_peaks {
         let p1 = peaks.get(&idx_v1).cloned().unwrap_or(0.0);
         let p2 = peaks.get(&idx_v2).cloned().unwrap_or(0.0);
@@ -1349,50 +1361,46 @@ fn resolve_cn_states(
         debug!("Level 1 ({:.2}, idx {}): MAF peak {:.4}", v1, idx_v1, p1);
         debug!("Level 2 ({:.2}, idx {}): MAF peak {:.4}", v2, idx_v2, p2);
 
-        // Both levels have a MAF peak: use the one closest to 0.5 (heterozygous
-        // equilibrium) as the diploid level. If they are too similar to distinguish,
-        // warn and fall back to ratio logic.
+        // Both levels have a MAF peak: the one closer to 0.5 (heterozygous
+        // equilibrium) is the diploid level. Folded MAF is bounded above by
+        // 0.5, so "closer to 0.5" is simply the larger peak.
         if p1 > 0.0 && p2 > 0.0 {
-            let d1 = (p1 - 0.5_f64).abs();
-            let d2 = (p2 - 0.5_f64).abs();
+            let gap = (p1 - p2).abs();
 
-            if (d1 - d2).abs() < 0.04 {
+            if gap < MAF_PEAK_CLOSE_WARN {
                 let w = "MAF signals for the top two levels are too close. This may indicate low blast ratio.".to_string();
                 warn!("{}", w);
                 warnings.push(w);
             }
-            if d1 < d2 {
-                debug!(
-                    "MAF closest-to-0.5: v1 is diploid (MAF {:.4}, d={:.4}). v2 is CN3.",
-                    p1, d1
-                );
-                return (2.0 * v1 - v2, v1, v2);
-            } else {
-                debug!(
-                    "MAF closest-to-0.5: v2 is diploid (MAF {:.4}, d={:.4}). v1 is CN1.",
-                    p2, d2
-                );
-                return (v1, v2, v2 + (v2 - v1));
+
+            if gap >= MAF_PEAK_TIE {
+                if p1 > p2 {
+                    debug!("MAF closer-to-0.5: v1 is diploid (MAF {:.4}). v2 is CN3.", p1);
+                    return (2.0 * v1 - v2, v1, v2);
+                } else {
+                    debug!("MAF closer-to-0.5: v2 is diploid (MAF {:.4}). v1 is CN1.", p2);
+                    return (v1, v2, v2 + (v2 - v1));
+                }
             }
-        } else if p1 > 0.4 {
-            // Case 1: Only lower level has high MAF (>0.4)
-            // Coverage ratio sanity check: if v2/v1 >= 1.6, the levels are actually 1n/2n
-            // (the high MAF on lower level is misleading, possibly due to low blast fraction)
-            if v2 / v1 >= 1.6 {
-                debug!(
-                    "MAF suggests v1 is 2n, but ratio >= 1.6. Actually v1=1n, v2=2n. cn2/cn1 = {:.2}",
-                    v2 / v1
-                );
-                return (v1, v2, v2 + (v2 - v1));
-            } else {
-                debug!("Only v2 has MAF ({:.4} < 0.4) -> v2 likely haploid, v1 is diploid.", v2);
-                return (2.0 * v1 - v2, v1, v2);
-            }
-        } else if p2 > 0.4 {
-            // Case 2: Only higher level has high MAF (>0.4)
+            // Tie: the allele channel cannot separate the levels. Fall through
+            // to the coverage-ratio heuristic below.
             debug!(
-                "MAF suggests v2 is 2n (peak > 0.4). v1 likely 1n. cn2/cn1 = {:.2}",
-                v2 / v1
+                "MAF peaks {:.4} and {:.4} are within {:.2}. Falling back to ratio logic.",
+                p1, p2, MAF_PEAK_TIE
+            );
+        } else if p1 > maf_peak_diploid {
+            // Only the lower level has a peak, and it reads as balanced. The
+            // ratio >= RATIO_1N_2N case already returned above, so v1 is 2n.
+            debug!(
+                "Only v1 has a MAF peak ({:.4} > {:.2}) -> v1 is diploid, v2 is CN3.",
+                p1, maf_peak_diploid
+            );
+            return (2.0 * v1 - v2, v1, v2);
+        } else if p2 > maf_peak_diploid {
+            // Only the higher level has a peak, and it reads as balanced.
+            debug!(
+                "Only v2 has a MAF peak ({:.4} > {:.2}) -> v2 is diploid, v1 is CN1. cn2/cn1 = {:.2}",
+                p2, maf_peak_diploid, v2 / v1
             );
             return (v1, v2, v2 + (v2 - v1));
         } else {
@@ -1401,7 +1409,9 @@ fn resolve_cn_states(
         }
     }
 
-    // heuristic fallback logic
+    // Coverage-ratio heuristic, reached when MAF cannot decide. Note the seam:
+    // ratios at or above RATIO_1N_2N (1.6) already returned, so the 1n/2n arm
+    // here only ever fires for ratios in [1.51, 1.6).
     if v2 < v1 * 1.51 {
         (2.0 * v1 - v2, v1, v2)
     } else {
@@ -1895,3 +1905,160 @@ pub fn call_karyotype_gc_corrected_from_bins(
     result
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIPLOID: f64 = 0.35; // thresholds.maf_peak_diploid default
+
+    /// `levels` as `find_levels` produces them: (coverage, count), ordered by
+    /// count descending, so the index is what MAF peaks are keyed on.
+    fn resolve(
+        levels: &[(f64, usize)],
+        peaks: &[(usize, f64)],
+    ) -> ((f64, f64, f64), Vec<String>) {
+        let map: HashMap<usize, f64> = peaks.iter().cloned().collect();
+        let mut warnings = Vec::new();
+        let arg = if map.is_empty() { None } else { Some(&map) };
+        let cn = resolve_cn_states(levels, arg, &mut warnings, DIPLOID);
+        (cn, warnings)
+    }
+
+    #[test]
+    fn wide_ratio_is_1n_2n_before_maf_is_consulted() {
+        // v2/v1 = 1.7 >= 1.6. Both peaks say v1 is the balanced one, which
+        // would otherwise make v1 diploid -- the ratio must override.
+        let ((cn1, cn2, cn3), _) = resolve(&[(100.0, 40), (170.0, 30)], &[(0, 0.48), (1, 0.33)]);
+        assert_eq!((cn1, cn2), (100.0, 170.0), "lower level is 1n, higher is 2n");
+        assert!((cn3 - 240.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn narrow_ratio_lets_maf_decide() {
+        // v2/v1 = 1.4 < 1.6, so MAF picks. v1's peak is closer to 0.5.
+        let ((cn1, cn2, cn3), _) = resolve(&[(100.0, 40), (140.0, 30)], &[(0, 0.47), (1, 0.34)]);
+        assert_eq!((cn2, cn3), (100.0, 140.0), "v1 is diploid, v2 is CN3");
+        assert!((cn1 - 60.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn larger_peak_wins_when_it_is_the_higher_level() {
+        let ((cn1, cn2, cn3), _) = resolve(&[(100.0, 40), (140.0, 30)], &[(0, 0.31), (1, 0.46)]);
+        assert_eq!((cn1, cn2), (100.0, 140.0), "v2 is diploid, v1 is CN1");
+        assert!((cn3 - 180.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn peaks_within_the_warn_band_still_decide_but_warn() {
+        // gap = 0.02: inside the 0.03 warning band, outside the 0.01 tie band.
+        let ((_, cn2, _), warnings) = resolve(&[(100.0, 40), (140.0, 30)], &[(0, 0.46), (1, 0.44)]);
+        assert_eq!(cn2, 100.0, "larger peak (v1) is still diploid");
+        assert_eq!(warnings.len(), 1, "close peaks must warn");
+        assert!(warnings[0].contains("too close"));
+    }
+
+    #[test]
+    fn peaks_outside_the_warn_band_do_not_warn() {
+        let (_, warnings) = resolve(&[(100.0, 40), (140.0, 30)], &[(0, 0.47), (1, 0.34)]);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn tied_peaks_fall_back_to_ratio_logic() {
+        // gap = 0.005 < 0.01. Ratio 1.4 < 1.51, so the fallback says 2n/3n --
+        // note this is the OPPOSITE of what the (marginally) larger v2 peak
+        // would have given, which is the point of the tie band.
+        let ((cn1, cn2, cn3), warnings) =
+            resolve(&[(100.0, 40), (140.0, 30)], &[(0, 0.440), (1, 0.445)]);
+        assert_eq!((cn2, cn3), (100.0, 140.0), "ratio logic: v1 diploid");
+        assert!((cn1 - 60.0).abs() < 1e-9);
+        assert_eq!(warnings.len(), 1, "a tie is also close enough to warn");
+    }
+
+    #[test]
+    fn single_level_with_balanced_peak_is_diploid() {
+        let ((cn1, cn2, cn3), _) = resolve(&[(100.0, 40)], &[(0, 0.47)]);
+        assert_eq!((cn1, cn2, cn3), (50.0, 100.0, 150.0));
+    }
+
+    #[test]
+    fn single_level_with_unbalanced_peak_is_haploid() {
+        let ((cn1, cn2, cn3), _) = resolve(&[(100.0, 40)], &[(0, 0.30)]);
+        assert_eq!((cn1, cn2, cn3), (100.0, 200.0, 300.0));
+    }
+
+    #[test]
+    fn two_near_identical_levels_are_treated_as_one() {
+        // (v2 - v1) < 0.05 -> the single-level branch, decided by peak alone.
+        let ((cn1, cn2, _), _) = resolve(&[(100.0, 40), (100.02, 30)], &[(0, 0.47)]);
+        assert_eq!((cn1, cn2), (50.0, 100.0));
+    }
+
+    #[test]
+    fn no_maf_data_uses_ratio_alone() {
+        let ((_, cn2, cn3), _) = resolve(&[(100.0, 40), (140.0, 30)], &[]);
+        assert_eq!((cn2, cn3), (100.0, 140.0), "ratio 1.4 < 1.51 -> 2n/3n");
+
+        let ((cn1, cn2, _), _) = resolve(&[(100.0, 40), (155.0, 30)], &[]);
+        assert_eq!((cn1, cn2), (100.0, 155.0), "ratio 1.55 -> 1n/2n");
+    }
+
+    #[test]
+    fn one_level_missing_a_peak_uses_the_diploid_threshold() {
+        // Only v1 has a peak, and it is balanced -> v1 is diploid.
+        let ((_, cn2, cn3), _) = resolve(&[(100.0, 40), (140.0, 30)], &[(0, 0.46)]);
+        assert_eq!((cn2, cn3), (100.0, 140.0));
+
+        // Only v2 has a peak, and it is balanced -> v2 is diploid.
+        let ((cn1, cn2, _), _) = resolve(&[(100.0, 40), (140.0, 30)], &[(1, 0.46)]);
+        assert_eq!((cn1, cn2), (100.0, 140.0));
+    }
+
+    #[test]
+    fn single_peak_cutoff_is_maf_peak_diploid_not_a_literal() {
+        // Ratio 1.55 is chosen so the two outcomes differ: the MAF branch makes
+        // v1 diploid (2n/3n), while the ratio fallback makes it 1n/2n.
+        let levels = [(100.0, 40), (155.0, 30)];
+
+        // 0.37 sits in the band between maf_peak_diploid (0.35) and the 0.4
+        // literal this used to compare against -- it now counts as balanced.
+        let ((_, cn2, cn3), _) = resolve(&levels, &[(0, 0.37)]);
+        assert_eq!((cn2, cn3), (100.0, 155.0), "0.37 > 0.35 -> v1 is diploid");
+
+        // Below the threshold the peak is not evidence of balance, so the
+        // coverage ratio decides instead.
+        let ((cn1, cn2, _), _) = resolve(&levels, &[(0, 0.30)]);
+        assert_eq!((cn1, cn2), (100.0, 155.0), "0.30 < 0.35 -> ratio logic, 1n/2n");
+    }
+
+    #[test]
+    fn empty_levels_fall_back_to_unit_scale() {
+        let ((cn1, cn2, cn3), _) = resolve(&[], &[]);
+        assert_eq!((cn1, cn2, cn3), (1.0, 2.0, 3.0));
+    }
+}
+
+#[cfg(test)]
+mod median_tests {
+    use super::median_sorted;
+
+    #[test]
+    fn odd_count_takes_the_middle_value() {
+        assert_eq!(median_sorted(&[1.0, 2.0, 3.0]), 2.0);
+        assert_eq!(median_sorted(&[5.0]), 5.0);
+    }
+
+    #[test]
+    fn even_count_averages_the_two_middle_values() {
+        // The old plot code returned 3.0 here (the upper middle); the karyotype
+        // returned 2.5. All four call sites now agree on 2.5.
+        assert_eq!(median_sorted(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+        assert_eq!(median_sorted(&[10.0, 20.0]), 15.0);
+    }
+
+    #[test]
+    fn empty_slice_is_zero() {
+        assert_eq!(median_sorted(&[]), 0.0);
+    }
+}

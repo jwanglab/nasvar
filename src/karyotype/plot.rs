@@ -3,7 +3,7 @@ use log::{info, warn, error};
 use crate::plotting::prelude::*;
 use std::collections::HashMap;
 
-use super::{get_segment, CoverageBin};
+use super::{get_segment, median_sorted, CoverageBin};
 
 /// Canonical segment order for karyotype x-axis layout.
 const SEGMENT_ORDER: &[&str] = &[
@@ -110,7 +110,7 @@ pub fn plot_karyotype(
         // Median and percentile
         let mut sorted = vals.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let med = sorted[sorted.len() / 2];
+        let med = median_sorted(&sorted);
         let pct_val = sorted[(sorted.len() as f64 * y_percentile) as usize];
         seg_pcts.push(pct_val);
         median_x_start.push(seg_start);
@@ -380,7 +380,7 @@ pub fn plot_karyotype_with_baf(
         let seg_end = seg_start + (*n as f64 - 1.0);
         let mut sorted = vals.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let med = sorted[sorted.len() / 2];
+        let med = median_sorted(&sorted);
         median_x_start.push(*seg_start);
         median_x_end.push(seg_end);
         median_y.push(med);
