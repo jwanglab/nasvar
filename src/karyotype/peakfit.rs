@@ -46,8 +46,10 @@ const C_CAP: f64 = 400.0;
 const K_SD: f64 = 1.2;
 /// Merge-then-refit passes.
 const MERGE_PASSES: usize = 2;
-/// Below this many loci a level's fit is flagged low confidence. Mirrors the
-/// `min_maf_sites` threshold that already gates which levels get here at all.
+/// Below this many loci (after the low cut) no fit is attempted and no peak
+/// is called; a warning is logged instead. Matches the default of the
+/// `min_maf_sites` config threshold, which gates pipeline levels on the same
+/// post-0.1 counts before they get here.
 const MIN_N: usize = 50;
 
 /// Clamp applied to `x = 2*MAF` before fitting, keeping it off the `0`/`1`
@@ -63,9 +65,6 @@ const GRID_N: usize = 700;
 /// EM iteration cap and the log-likelihood improvement below which we stop.
 const MAX_ITERS: usize = 300;
 const CONVERGE_TOL: f64 = 1e-6;
-/// A level with fewer than this many loci after the low cut gets no fit at all
-/// (distinct from [`MIN_N`], which only flags low confidence).
-const MIN_N_FIT: usize = 5;
 
 // --------------------------------------------------------------------------------
 // ln Gamma
@@ -183,8 +182,6 @@ pub struct Component {
 pub struct LevelFit {
     /// Loci surviving the low cut.
     pub n: usize,
-    /// `n < MIN_N` -- the fit ran but should not be trusted on its own.
-    pub low_confidence: bool,
     /// K chosen by BIC, before merging.
     pub bic_k: usize,
     /// K after the merge-then-refit passes.
@@ -544,16 +541,26 @@ pub fn overall_peak(fit: &BetaMix, grid: &[f64]) -> f64 {
 
 /// Full pipeline for one level's folded MAF.
 ///
+/// A level with fewer than [`MIN_N`] loci after the low cut gets a warning
+/// and no fit: on that little data the EM can converge on pure artifacts
+/// (e.g. assign everything to the background yet still have a nominal crest),
+/// so no peak is called at all rather than a misleading one.
+///
 /// Note the merge loop runs [`MERGE_PASSES`] passes rather than one: the first
 /// refit can leave two still-overlapping components that a single pass would
 /// never re-check.
 pub fn fit_level(maf: &[f64]) -> LevelFit {
     let kept: Vec<f64> = maf.iter().copied().filter(|&m| m >= LOW_CUT).collect();
     let n = kept.len();
-    if n < MIN_N_FIT {
+    if n < MIN_N {
+        log::warn!(
+            "MAF peak fit skipped: only {} loci with MAF >= {} (need {}); no peak called.",
+            n,
+            LOW_CUT,
+            MIN_N
+        );
         return LevelFit {
             n,
-            low_confidence: true,
             bic_k: 0,
             final_k: 0,
             noise_fraction: 0.0,
@@ -589,7 +596,6 @@ pub fn fit_level(maf: &[f64]) -> LevelFit {
     let peak = overall_peak(&fit, &grid);
     LevelFit {
         n,
-        low_confidence: n < MIN_N,
         bic_k,
         final_k: fit.k,
         noise_fraction: fit.wbg,
@@ -690,7 +696,6 @@ mod tests {
         let peak = r.overall_peak.expect("fit produced a peak");
         assert_eq!(r.final_k, 1, "one bump should collapse to K=1");
         assert!((peak - 0.45).abs() < 0.01, "peak = {peak}");
-        assert!(!r.low_confidence);
     }
 
     #[test]
@@ -738,7 +743,6 @@ mod tests {
         let r = fit_level(&[0.42, 0.45, 0.47]);
         assert!(r.fit.is_none());
         assert!(r.overall_peak.is_none());
-        assert!(r.low_confidence);
         assert_eq!(r.final_k, 0);
     }
 

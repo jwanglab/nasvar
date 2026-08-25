@@ -739,6 +739,7 @@ fn find_levels_maf(
     maf_data: &HashMap<String, Vec<f64>>,
     levels: &[(f64, usize)],
     medians: &HashMap<String, f64>,
+    min_maf_sites: usize,
 ) -> HashMap<usize, Vec<f64>> {
     // Only look at first 3 levels
     let top_levels: Vec<f64> = levels.iter().take(3).map(|x| x.0).collect();
@@ -778,8 +779,10 @@ fn find_levels_maf(
                     all_mafs.extend(v);
                 }
             }
-            if all_mafs.len() >= 50 {
-                // filter low count
+            // Filter low count. parse_maf only keeps sites with MAF > 0.1, so
+            // this count already matches the population fit_level will fit --
+            // this is THE per-level gate on MAF data sufficiency.
+            if all_mafs.len() >= min_maf_sites {
                 levels_maf.insert(idx, all_mafs);
             }
         }
@@ -793,6 +796,11 @@ fn find_levels_maf(
 /// The peak is the crest of the largest-AREA bump in the fitted mixture, which
 /// is what makes a broad balanced peak win over a narrow low-MAF spike. See
 /// [`peakfit`] and `MAF_PEAKFIT_K2_METHOD.txt` for the method.
+///
+/// Levels arrive pre-gated: parse_maf keeps only MAF > 0.1 and find_levels_maf
+/// requires at least `min_maf_sites` such points. fit_level enforces its own
+/// floor of 50 loci besides (warning and no peak below it), which only bites
+/// when `min_maf_sites` is configured below 50.
 fn find_maf_peak(levels_maf: &HashMap<usize, Vec<f64>>) -> HashMap<usize, f64> {
     let mut levels_maf_peak = HashMap::new();
 
@@ -803,14 +811,8 @@ fn find_maf_peak(levels_maf: &HashMap<usize, Vec<f64>>) -> HashMap<usize, f64> {
             continue;
         };
         debug!(
-            "Level {}: n={} BIC-K={}->{} noise={:.3} peak={:.4}{}",
-            idx,
-            fit.n,
-            fit.bic_k,
-            fit.final_k,
-            fit.noise_fraction,
-            peak,
-            if fit.low_confidence { "  [LOW-N]" } else { "" }
+            "Level {}: n={} BIC-K={}->{} noise={:.3} peak={:.4}",
+            idx, fit.n, fit.bic_k, fit.final_k, fit.noise_fraction, peak
         );
         for (i, c) in fit.components.iter().enumerate() {
             debug!(
@@ -957,7 +959,7 @@ pub fn call_karyotype_from_bins(
             };
 
             if maf_sufficient {
-                let lvls_maf = find_levels_maf(&maf_data, &levels, &medians);
+                let lvls_maf = find_levels_maf(&maf_data, &levels, &medians, thresholds.min_maf_sites);
                 let peaks = find_maf_peak(&lvls_maf);
                 if !peaks.is_empty() {
                     levels_maf_peaks = Some(peaks);
