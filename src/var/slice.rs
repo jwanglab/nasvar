@@ -602,7 +602,11 @@ pub fn write_slice_fasta(
             .map(|m| m.to_bam_name(chrom))
             .unwrap_or_else(|| chrom.clone());
 
-        let region_str = format!("{}:{}-{}", fasta_chrom, start, end);
+        // Region coords are 1-based inclusive for noodles
+        let start_1b = (*start).max(1);
+        let end_1b = (*end).max(start_1b);
+
+        let region_str = format!("{}:{}-{}", fasta_chrom, start_1b, end_1b);
         let region: Region = match region_str.parse() {
             Ok(r) => r,
             Err(e) => {
@@ -621,7 +625,8 @@ pub fn write_slice_fasta(
         let total_bases = bases.len();
 
         // Header — use the BAM-style chrom so the viewer can look up by it.
-        let name = format!("{}:{}-{}", chrom, start, end);
+        // Same clamped 1-based coords as the query above.
+        let name = format!("{}:{}-{}", chrom, start_1b, end_1b);
         let header_line = format!(">{}\n", name);
         out.write_all(header_line.as_bytes())?;
         offset += header_line.len() as u64;

@@ -11,7 +11,8 @@
 //!
 //! Intended for client-side visualization (drop-zone viewer): the layout is
 //! trivial to parse into a `Uint32Array` and index by
-//! `chrom_offset + pos / bin_size`.
+//! `chrom_offset + pos / bin_size`. The viewer overlays repeat-masked
+//! regions from a separately-served reference bitmap.
 //!
 //! Binary layout (little-endian throughout):
 //!
