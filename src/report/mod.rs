@@ -582,6 +582,9 @@ fn build_qc_section(md: &mut String, karyo: &Option<KaryotypeOutput>, qc: Option
             let mean_cov = q.nt_on_target / q.target_regions_nt;
             md.push_str(&format!("- Mean coverage over target regions: **{:.2}x**\n", mean_cov));
         }
+        if let Some(mq) = q.median_read_quality_enriched {
+            md.push_str(&format!("- Median read quality over enriched regions: **Q{:.1}**\n", mq));
+        }
     }
     md.push('\n');
 }

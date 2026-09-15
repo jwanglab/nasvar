@@ -4,7 +4,7 @@ use crate::input::{AlignmentInput, AlignmentHeader, AlignmentRecord, CigarKind};
 use crate::config::{Contig, PipelineConfig};
 use crate::output::{OutputCollector, FusionsOutput, UnifiedOutput};
 use crate::utils::bed::BedRegion;
-use crate::utils::qc::PipelineQcData;
+use crate::utils::qc::{EnrichedReadQ, PipelineQcData, ReadQStats};
 use crate::var::maf::{Site, filter_enriched_sites};
 use crate::var::fusions::FusionAccumulator;  // Shared fusion accumulator
 use crate::var::coverage::CoverageAccumulator;  // Shared coverage accumulator
@@ -23,6 +23,11 @@ pub struct PipelineResult {
     /// adaptive-sampling coverage (which writes its own TSV) or lacked a
     /// coverage repeats mask so no accumulator ran.
     pub coverage_bins: Option<Vec<crate::var::coverage::CoverageBin>>,
+    /// Per-read quality (mean-error definition) of primary reads overlapping
+    /// enriched regions. `None` when MAF wasn't run or no such reads exist.
+    /// Low values here blur the MAF signal, so the karyotype step surfaces
+    /// them as a warning.
+    pub enriched_read_quality: Option<ReadQStats>,
 }
 
 pub struct PipelineRunner<'a> {
@@ -159,6 +164,15 @@ impl<'a> PipelineRunner<'a> {
             MafAccumulator::new(&header, filtered, &contigs)
         });
 
+        // Read quality over enriched regions: whole-read mean-error Q of
+        // primary reads whose alignment overlaps the enriched BED. Tied to
+        // the MAF inputs because its purpose is flagging quality low enough
+        // to blur the MAF signal.
+        let mut enriched_q_acc = self
+            .maf_regions
+            .as_ref()
+            .map(|regions| EnrichedReadQ::new(&header, regions, &contigs));
+
         // Fusion accumulator requires config for per-gene margins
         let mut fusion_acc = if let Some(targets) = &self.fusion_targets {
             let config = self.config.expect("PipelineConfig required for fusion calling - use .with_config()");
@@ -222,6 +236,9 @@ impl<'a> PipelineRunner<'a> {
             if let Some(q) = &mut qc_acc {
                 q.process(&record);
             }
+            if let Some(e) = &mut enriched_q_acc {
+                e.process(&record);
+            }
             if let Some(c) = &mut cov100k_acc { c.process(&record); }
         }
         info!("Processed {} reads. Done.", i);
@@ -278,6 +295,13 @@ impl<'a> PipelineRunner<'a> {
         // otherwise from the main-BAM QcAccumulator. Target QC stats
         // (nt_on_target, reads_on_target, focal_depths) always come from the
         // main BAM regardless of AS.
+        let enriched_read_quality = enriched_q_acc.as_ref().and_then(|e| e.stats());
+        if let Some(rq) = &enriched_read_quality {
+            info!(
+                "Median read quality over enriched regions: Q{:.1} ({} reads)",
+                rq.median, rq.reads
+            );
+        }
         let (reads_aligned, focal_depths) = if let Some(q) = qc_acc {
             let count = as_reads_aligned.unwrap_or_else(|| q.reads_aligned());
             if as_reads_aligned.is_some() {
@@ -286,7 +310,11 @@ impl<'a> PipelineRunner<'a> {
                 info!("Total aligned reads (primary): {}", count);
             }
             let fd = q.focal_depths();
-            collector = collector.with_qc(q.to_qc_data());
+            let mut qc_data = q.to_qc_data();
+            if let Some(rq) = &enriched_read_quality {
+                qc_data.median_read_quality_enriched = Some(rq.median);
+            }
+            collector = collector.with_qc(qc_data);
             collector = collector.with_reads_aligned(count);
             collector = collector.with_target_coverage(fd.clone());
             (Some(count), Some(fd))
@@ -372,6 +400,7 @@ impl<'a> PipelineRunner<'a> {
             reads_aligned,
             focal_depths,
             coverage_bins,
+            enriched_read_quality,
         })
     }
 }
@@ -629,6 +658,7 @@ impl QcAccumulator {
             nt_on_target: self.nt_on_target as f64,
             reads_on_target: self.reads_on_target as f64,
             target_regions_nt: self.target_regions_nt as f64,
+            ..Default::default()
         }
     }
 

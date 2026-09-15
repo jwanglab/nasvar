@@ -254,9 +254,14 @@ pub struct KaryotypeThresholds {
     pub min_depth: u32,
     #[serde(default = "default_plot_y_percentile")]
     pub plot_y_percentile: f64,
+    /// Warn in the karyotype section when median read quality over enriched
+    /// regions falls below this (low quality blurs the MAF signal).
+    #[serde(default = "default_min_read_quality")]
+    pub min_read_quality: f64,
 }
 
 fn default_spread_warning() -> f64 { 0.08 }
+fn default_min_read_quality() -> f64 { 15.0 }
 fn default_level_tolerance() -> f64 { 0.3 }
 fn default_maf_peak_diploid() -> f64 { 0.35 }
 fn default_min_maf_sites() -> usize { 50 }
@@ -339,6 +344,7 @@ impl Default for KaryotypeThresholds {
             min_maf_sites: default_min_maf_sites(),
             min_depth: default_min_depth(),
             plot_y_percentile: default_plot_y_percentile(),
+            min_read_quality: default_min_read_quality(),
         }
     }
 }

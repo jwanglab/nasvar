@@ -1051,8 +1051,8 @@ fn main() {
                     None => None,
                 });
 
-            let (pipeline_output, reads_aligned, focal_depths, coverage_bins) = match runner.run(&mut br) {
-                Ok(r) => (r.output, r.reads_aligned, r.focal_depths, r.coverage_bins),
+            let (pipeline_output, reads_aligned, focal_depths, coverage_bins, enriched_read_quality) = match runner.run(&mut br) {
+                Ok(r) => (r.output, r.reads_aligned, r.focal_depths, r.coverage_bins, r.enriched_read_quality),
                 Err(e) => {
                     error!("Error in PipelineRunner: {}", e);
                     return;
@@ -1114,7 +1114,7 @@ fn main() {
                     cli.debug,
                 )
             };
-            let (karyo_result, est_blast_ratio) = match karyo_res_call {
+            let (mut karyo_result, est_blast_ratio) = match karyo_res_call {
                 Ok(karyo_output) => {
                     let br = karyo_output.blast_ratio;
                     (Some(karyo_output), br)
@@ -1124,6 +1124,21 @@ fn main() {
                     (None, None)
                 }
             };
+            // Low read quality blurs the MAF signal the karyotype call leans
+            // on; surface it alongside the karyotype's own warnings. (The
+            // report prepends the "WARNING:" label to each line itself.)
+            if let (Some(karyo), Some(rq)) = (karyo_result.as_mut(), enriched_read_quality.as_ref())
+                && rq.median < karyo_thresholds.min_read_quality
+            {
+                let w = format!(
+                    "Median read quality over enriched regions is Q{:.1} (below Q{:.0}). This may affect MAF signal.",
+                    rq.median, karyo_thresholds.min_read_quality
+                );
+                karyo.warnings = Some(match karyo.warnings.take() {
+                    Some(existing) => format!("{}\n{}", existing, w),
+                    None => w,
+                });
+            }
             let effective_blast_ratio = blast_ratio.or(est_blast_ratio);
             if let Some(br) = effective_blast_ratio {
                 info!("Using effective blast ratio: {:.4}", br);

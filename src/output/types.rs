@@ -79,6 +79,11 @@ pub struct QcOutput {
     /// Per-target average coverage (gene name -> mean depth)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_coverage: Option<HashMap<String, f64>>,
+
+    /// Median per-read quality (mean-error-probability definition) of primary
+    /// reads overlapping enriched regions
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median_read_quality_enriched: Option<f64>,
 }
 
 impl From<PipelineQcData> for QcOutput {
@@ -90,6 +95,7 @@ impl From<PipelineQcData> for QcOutput {
             reads_aligned: None,
             mean_coverage: None,
             target_coverage: None,
+            median_read_quality_enriched: qc.median_read_quality_enriched,
         }
     }
 }
