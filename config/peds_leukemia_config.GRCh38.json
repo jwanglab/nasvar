@@ -151,9 +151,6 @@
       "breakpoint_margin": 50,
       "min_anchor": 500
     },
-    "maf": {
-      "min_depth": 20
-    },
     "coverage": {
       "bin_size": 1000000
     },
@@ -161,7 +158,8 @@
       "spread_warning": 0.08,
       "level_tolerance": 0.3,
       "maf_peak_diploid": 0.35,
-      "min_maf_sites": 50
+      "min_maf_sites": 50,
+      "min_depth": 20
     }
   }
 }

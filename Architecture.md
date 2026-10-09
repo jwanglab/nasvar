@@ -95,7 +95,7 @@ for each record:
 - Pre-indexes sites by chromosome and position
 - Uses `partition_point` (binary search) for efficient site lookup within each read span
 - Counts `[A, C, G, T, N]` at each site position via CIGAR walk
-- Filters output by `min_depth` threshold (default: 20)
+- Writes ref/alt counts for every site (no depth filter; `karyotype.min_depth` is applied when the karyotype step parses the `.maf`)
 
 **FusionScanner**:
 - Builds a `HashMap` of target regions by reference ID
@@ -485,7 +485,7 @@ Pharmacogenomics genes (configured in `snv.pharmacogenomics`) report all variant
 - Reads sites file (tab-separated: `CHR POS REF ALT`)
 - Groups sites by enriched regions (only counts alleles within enriched BED regions)
 - For each overlapping read: walks CIGAR to determine the base at each site position
-- Outputs ref/alt counts per site, filtered by `min_depth` (20)
+- Outputs ref/alt counts for every site (no depth filter; `karyotype.min_depth` is applied when the karyotype step parses the `.maf`)
 
 ## Configuration System
 
@@ -558,12 +558,12 @@ Each entry maps a gene name to `ItdRegion`:
 | CNV | `min_supporting_reads` | 3 |
 | CNV | `breakpoint_margin` | 50 bp |
 | CNV | `min_anchor` | 500 bp |
-| MAF | `min_depth` | 20 |
 | Coverage | `bin_size` | 1000000 (1 Mb) |
 | Karyotype | `spread_warning` | 0.08 |
 | Karyotype | `level_tolerance` | 0.3 |
 | Karyotype | `maf_peak_diploid` | 0.4 |
 | Karyotype | `min_maf_sites` | 50 |
+| Karyotype | `min_depth` | 20 (overridden by `--min-depth` when passed) |
 | Breakpoint Consensus | `flank_size` | 200 bp |
 | Breakpoint Consensus | `min_reads` | 3 |
 | Breakpoint Consensus | `min_coverage` | 3 |

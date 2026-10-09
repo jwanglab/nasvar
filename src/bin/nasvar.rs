@@ -157,9 +157,11 @@ enum Commands {
         /// GC bias correction method for karyotype inference (default: loess).
         #[arg(long, value_enum, default_value_t = nasvar::karyotype::GcCorrectionMethod::Loess)]
         gc_correction: nasvar::karyotype::GcCorrectionMethod,
-        /// Minimum read depth at a MAF site for BAF plotting (sites below this are spacers).
-        #[arg(long, default_value_t = 20)]
-        min_depth: u32,
+        /// Minimum read depth at a MAF site for karyotype MAF calling and BAF plotting
+        /// (sites below this are spacers). Overrides `thresholds.karyotype.min_depth`
+        /// in the config (default 20).
+        #[arg(long)]
+        min_depth: Option<u32>,
         /// Per-segment percentile for karyotype plot y-axis limit (0.0-1.0).
         #[arg(long, default_value_t = 0.95)]
         plot_y_percentile: f64,
@@ -289,9 +291,11 @@ enum Commands {
         /// GC bias correction method for karyotype inference (default: loess).
         #[arg(long, value_enum, default_value_t = nasvar::karyotype::GcCorrectionMethod::Loess)]
         gc_correction: nasvar::karyotype::GcCorrectionMethod,
-        /// Minimum read depth at a MAF site for BAF plotting (sites below this are spacers).
-        #[arg(long, default_value_t = 20)]
-        min_depth: u32,
+        /// Minimum read depth at a MAF site for karyotype MAF calling and BAF plotting
+        /// (sites below this are spacers). Overrides `thresholds.karyotype.min_depth`
+        /// in the config (default 20).
+        #[arg(long)]
+        min_depth: Option<u32>,
         /// Per-segment percentile for karyotype plot y-axis limit (0.0-1.0).
         #[arg(long, default_value_t = 0.95)]
         plot_y_percentile: f64,
@@ -641,7 +645,9 @@ fn main() {
             };
 
             let mut karyo_thresholds = pipeline_config.thresholds.karyotype.clone();
-            karyo_thresholds.min_depth = *min_depth;
+            if let Some(d) = min_depth {
+                karyo_thresholds.min_depth = *d;
+            }
             karyo_thresholds.plot_y_percentile = *plot_y_percentile;
 
             // Compute seg_bases for MAF sufficiency check if sites and enriched are provided
@@ -1085,7 +1091,9 @@ fn main() {
             timer.start("Karyotype Analysis");
             let seg_bases = nasvar::karyotype::compute_seg_bases(&s_vec, &e_vec, &ref_config);
             let mut karyo_thresholds = pipeline_config.thresholds.karyotype.clone();
-            karyo_thresholds.min_depth = *min_depth;
+            if let Some(d) = min_depth {
+                karyo_thresholds.min_depth = *d;
+            }
             karyo_thresholds.plot_y_percentile = *plot_y_percentile;
             let karyo_res_call = if let Some(ref bins) = coverage_bins {
                 nasvar::karyotype::call_karyotype_gc_corrected_from_bins(

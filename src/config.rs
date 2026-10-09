@@ -221,13 +221,6 @@ fn default_cnv_min_supporting_reads() -> usize { 3 }
 fn default_breakpoint_margin() -> u32 { 50 }
 fn default_cnv_min_anchor() -> u32 { 500 }
 
-/// MAF threshold configuration
-#[derive(Deserialize, Debug, Clone)]
-pub struct MafThresholds {
-    #[serde(default = "default_min_depth")]
-    pub min_depth: u32,
-}
-
 fn default_min_depth() -> u32 { 20 }
 
 /// Coverage threshold configuration
@@ -278,8 +271,6 @@ pub struct ThresholdConfig {
     #[serde(default)]
     pub cnv: CnvThresholds,
     #[serde(default)]
-    pub maf: MafThresholds,
-    #[serde(default)]
     pub coverage: CoverageThresholds,
     #[serde(default)]
     pub karyotype: KaryotypeThresholds,
@@ -315,14 +306,6 @@ impl Default for CnvThresholds {
             min_supporting_reads: default_cnv_min_supporting_reads(),
             breakpoint_margin: default_breakpoint_margin(),
             min_anchor: default_cnv_min_anchor(),
-        }
-    }
-}
-
-impl Default for MafThresholds {
-    fn default() -> Self {
-        Self {
-            min_depth: default_min_depth(),
         }
     }
 }
