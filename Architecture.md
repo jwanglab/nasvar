@@ -563,6 +563,7 @@ Each entry maps a gene name to `ItdRegion`:
 | Karyotype | `level_tolerance` | 0.3 |
 | Karyotype | `maf_peak_diploid` | 0.4 |
 | Karyotype | `min_maf_sites` | 50 |
+| Karyotype | `min_maf_segments` | 20 |
 | Karyotype | `min_depth` | 20 (overridden by `--min-depth` when passed) |
 | Breakpoint Consensus | `flank_size` | 200 bp |
 | Breakpoint Consensus | `min_reads` | 3 |

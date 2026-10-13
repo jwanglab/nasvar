@@ -54,8 +54,8 @@ fn extract_sample_name(run_dir: &str) -> String {
     let path = Path::new(run_dir);
     let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or(run_dir);
 
-    // Extract name up to first '.'
-    if let Some(idx) = filename.find('.') {
+    // Extract name up to last '.'
+    if let Some(idx) = filename.rfind('.') {
         filename[..idx].to_string()
     } else {
         filename.to_string()

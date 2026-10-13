@@ -945,7 +945,7 @@ pub fn call_karyotype_from_bins(
                 seg_ratios.sort_by(|a, b| a.0.cmp(&b.0));
                 debug!("MAF sufficiency ratios (maf_count/seg_bases): [{}]",
                     seg_ratios.iter().map(|(s, r)| format!("({}, {:.3e})", s, r)).collect::<Vec<_>>().join(", "));
-                if sufficient_segs < 20 {
+                if sufficient_segs < thresholds.min_maf_segments {
                     let w = "Not enough MAF data for karyotyping!".to_string();
                     warn!("{}", w);
                     warnings.push(w);

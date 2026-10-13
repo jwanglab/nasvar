@@ -159,7 +159,8 @@
       "level_tolerance": 0.3,
       "maf_peak_diploid": 0.35,
       "min_maf_sites": 50,
-      "min_depth": 10
+      "min_maf_segments": 20,
+      "min_depth": 20
     }
   }
 }

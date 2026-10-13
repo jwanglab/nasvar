@@ -243,6 +243,10 @@ pub struct KaryotypeThresholds {
     pub maf_peak_diploid: f64,
     #[serde(default = "default_min_maf_sites")]
     pub min_maf_sites: usize,
+    /// Minimum number of segments with sufficient MAF site density for MAF
+    /// to be used in karyotyping (below this: "Not enough MAF data" warning).
+    #[serde(default = "default_min_maf_segments")]
+    pub min_maf_segments: usize,
     #[serde(default = "default_min_depth")]
     pub min_depth: u32,
     #[serde(default = "default_plot_y_percentile")]
@@ -258,6 +262,7 @@ fn default_min_read_quality() -> f64 { 15.0 }
 fn default_level_tolerance() -> f64 { 0.3 }
 fn default_maf_peak_diploid() -> f64 { 0.35 }
 fn default_min_maf_sites() -> usize { 50 }
+fn default_min_maf_segments() -> usize { 20 }
 fn default_plot_y_percentile() -> f64 { 0.95 }
 
 /// All threshold configurations
@@ -325,6 +330,7 @@ impl Default for KaryotypeThresholds {
             level_tolerance: default_level_tolerance(),
             maf_peak_diploid: default_maf_peak_diploid(),
             min_maf_sites: default_min_maf_sites(),
+            min_maf_segments: default_min_maf_segments(),
             min_depth: default_min_depth(),
             plot_y_percentile: default_plot_y_percentile(),
             min_read_quality: default_min_read_quality(),
