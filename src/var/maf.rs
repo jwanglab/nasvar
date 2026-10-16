@@ -108,8 +108,11 @@ pub fn filter_repeat_sites(sites: &mut [Vec<Site>], repeats: &[BedRegion], conti
             repeats_by_chr[idx].push((r.start as usize, r.end as usize));
         }
     }
+    // Merge overlapping/abutting intervals. Repeat masks stack annotations
+    // (e.g. Alus nested inside an SD or centromere-transition block), and the
+    // single-interval lookup below is only correct when intervals are disjoint.
     for intervals in &mut repeats_by_chr {
-        intervals.sort_unstable();
+        *intervals = merge_intervals(std::mem::take(intervals));
     }
 
     for (chr_idx, chr_sites) in sites.iter_mut().enumerate() {
@@ -126,6 +129,20 @@ pub fn filter_repeat_sites(sites: &mut [Vec<Site>], repeats: &[BedRegion], conti
             site.pos >= end // keep if site is at or past the end of the interval
         });
     }
+}
+
+/// Sort half-open intervals and merge any that overlap or abut, so the result
+/// is disjoint and sorted by start.
+fn merge_intervals(mut intervals: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    intervals.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(intervals.len());
+    for (start, end) in intervals {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
 }
 
 pub fn calc_maf(
@@ -239,4 +256,55 @@ pub fn calc_maf(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contigs() -> Vec<Contig> {
+        vec![Contig { name: "chr1".into(), accession: "NC_000001.11".into() }]
+    }
+
+    fn region(start: u32, end: u32) -> BedRegion {
+        BedRegion { segment: "chr1".into(), start, end, name: String::new() }
+    }
+
+    fn sites_at(positions: &[usize]) -> Vec<Vec<Site>> {
+        vec![positions.iter().map(|&pos| Site { pos, al0: 0, al1: 1 }).collect()]
+    }
+
+    fn kept(sites: &[Vec<Site>]) -> Vec<usize> {
+        sites[0].iter().map(|s| s.pos).collect()
+    }
+
+    #[test]
+    fn site_inside_large_interval_after_nested_small_one_is_removed() {
+        // 150 is past the small repeat's end but still inside the big block.
+        let mut sites = sites_at(&[50, 105, 150, 250]);
+        let repeats = [region(100, 200), region(100, 120), region(130, 140)];
+        filter_repeat_sites(&mut sites, &repeats, &contigs());
+        assert_eq!(kept(&sites), vec![50, 250]);
+    }
+
+    #[test]
+    fn unsorted_and_abutting_intervals_are_handled() {
+        let mut sites = sites_at(&[99, 100, 150, 199, 200, 300]);
+        let repeats = [region(150, 200), region(100, 150)];
+        filter_repeat_sites(&mut sites, &repeats, &contigs());
+        assert_eq!(kept(&sites), vec![99, 200, 300]);
+    }
+
+    #[test]
+    fn interval_end_is_exclusive() {
+        let mut sites = sites_at(&[10, 19, 20]);
+        filter_repeat_sites(&mut sites, &[region(10, 20)], &contigs());
+        assert_eq!(kept(&sites), vec![20]);
+    }
+
+    #[test]
+    fn merge_intervals_merges_overlapping_and_abutting() {
+        let merged = merge_intervals(vec![(30, 40), (0, 10), (5, 8), (10, 15), (20, 25)]);
+        assert_eq!(merged, vec![(0, 15), (20, 25), (30, 40)]);
+    }
 }

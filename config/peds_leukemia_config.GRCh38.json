@@ -98,7 +98,9 @@
         ["CYP2C19", "CYP2C9"],
         ["BCR", "IGL"],
         ["IGK", "IGL"],
-        ["IGK", "KMT2C"]
+        ["IGK", "KMT2C"],
+	["RRAS2", "CRLF2"],
+	["IGK", "DUX4L16"]
       ],
       "one_sided_genes": [
         "ABL1", "ABL2", "BCL11B", "CREBBP", "EP300", "ERG", "ETV6",
