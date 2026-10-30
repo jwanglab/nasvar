@@ -1208,6 +1208,11 @@ pub fn call_karyotype_from_bins(
     let blast_ratio = estimate_blast_ratio(&cn_depths_auto);
     if let Some(br) = blast_ratio {
         info!("Estimated blast ratio: {:.4}", br);
+        if br < LOW_BLAST_RATIO {
+            let w = "Estimated blast ratio is low. This could indicate subclonal CNV.".to_string();
+            warn!("{}", w);
+            warnings.push(w);
+        }
     } else {
         warn!("Could not estimate blast ratio (insufficient data).");
     }
@@ -1286,6 +1291,9 @@ const MAF_PEAK_CLOSE_WARN: f64 = 0.03;
 /// Two MAF peaks this close are a tie -- the allele channel cannot separate
 /// the levels at all, so the coverage ratio decides instead.
 const MAF_PEAK_TIE: f64 = 0.01;
+/// Estimated blast ratios below this carry a warning: the CNV may be
+/// subclonal rather than present in all blasts.
+const LOW_BLAST_RATIO: f64 = 0.3;
 
 fn resolve_cn_states(
     levels: &[(f64, usize)],
