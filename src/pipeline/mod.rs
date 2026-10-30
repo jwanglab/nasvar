@@ -310,6 +310,9 @@ impl<'a> PipelineRunner<'a> {
                 info!("Total aligned reads (primary): {}", count);
             }
             let fd = q.focal_depths();
+            let counts_path = format!("{}.target_counts.tsv", self.out_prefix);
+            q.write_target_counts(&counts_path)?;
+            info!("Wrote per-gene target read counts to {}", counts_path);
             let mut qc_data = q.to_qc_data();
             if let Some(rq) = &enriched_read_quality {
                 qc_data.median_read_quality_enriched = Some(rq.median);
@@ -544,6 +547,30 @@ struct PerTarget {
     start: i32,
     end: i32,
     total_bases: u64,
+    /// Index into `QcAccumulator::genes`
+    gene: usize,
+}
+
+/// Per-gene read counts for `{prefix}.target_counts.tsv`. BED entries sharing a
+/// name are one gene; a read touching several of its intervals counts once.
+/// Positions here are 0-based (`record.pos`) to match the BED.
+struct GeneCounts {
+    name: String,
+    chrom: String,
+    start: u32,
+    end: u32,
+    length: u64,
+    /// Primary alignments (flag & 0x904 == 0) with >= 1 aligned base in the gene
+    reads: u64,
+    /// All alignment records with >= 1 aligned base in the gene
+    alignments: u64,
+    /// Aligned (M/=/X) bases in the gene, all records / primary only
+    bases_all: u64,
+    bases_primary: u64,
+    /// Sum of squared on-gene bases per primary read (for the CV)
+    bases_primary_sq: f64,
+    /// Sum of query lengths (M/I/S/=/X) of the primary reads
+    read_len_sum: u64,
 }
 
 pub struct QcAccumulator {
@@ -551,6 +578,7 @@ pub struct QcAccumulator {
     targets: Vec<PerTarget>,
     /// ref_id -> indices into `targets`
     by_ref: HashMap<usize, Vec<usize>>,
+    genes: Vec<GeneCounts>,
     margin: i32,
     pub nt_on_target: u64,
     pub reads_on_target: u64,
@@ -563,17 +591,42 @@ impl QcAccumulator {
         let mapper = ContigMapper::from_contigs_and_refs(contigs, &header.refs);
         let mut per_targets = Vec::with_capacity(targets.len());
         let mut by_ref: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut genes: Vec<GeneCounts> = Vec::new();
+        let mut gene_idx: HashMap<String, usize> = HashMap::new();
         let mut target_regions_nt: u64 = 0;
 
         for t in targets {
             let bam_chrom = mapper.to_bam_name(&t.segment);
             if let Some(ref_id) = header.refs.iter().position(|r| r == &bam_chrom) {
+                let gene = *gene_idx.entry(t.name.clone()).or_insert_with(|| {
+                    genes.push(GeneCounts {
+                        name: t.name.clone(),
+                        chrom: t.segment.clone(),
+                        start: t.start,
+                        end: t.end,
+                        length: 0,
+                        reads: 0,
+                        alignments: 0,
+                        bases_all: 0,
+                        bases_primary: 0,
+                        bases_primary_sq: 0.0,
+                        read_len_sum: 0,
+                    });
+                    genes.len() - 1
+                });
+                let g = &mut genes[gene];
+                if g.chrom == t.segment {
+                    g.start = g.start.min(t.start);
+                    g.end = g.end.max(t.end);
+                }
+                g.length += (t.end - t.start) as u64;
                 let idx = per_targets.len();
                 per_targets.push(PerTarget {
                     name: t.name.clone(),
                     start: t.start as i32,
                     end: t.end as i32,
                     total_bases: 0,
+                    gene,
                 });
                 by_ref.entry(ref_id).or_default().push(idx);
             }
@@ -582,6 +635,7 @@ impl QcAccumulator {
         Self {
             targets: per_targets,
             by_ref,
+            genes,
             margin: 5000,
             nt_on_target: 0,
             reads_on_target: 0,
@@ -610,6 +664,8 @@ impl QcAccumulator {
         let start = record.alignment_start().unwrap_or(0) as i32;
         let end = start + record.alignment_span() as i32;
         let mut counted_read = false;
+        // On-gene aligned bases of this record for the read counts, per gene index
+        let mut gene_bases: Vec<(usize, u64)> = Vec::new();
 
         for &idx in indices {
             let t = &mut self.targets[idx];
@@ -621,9 +677,13 @@ impl QcAccumulator {
                 continue;
             }
 
-            // Walk CIGAR, count only M/=/X bases clipped to the target interval
+            // Walk CIGAR, count only M/=/X bases clipped to the target interval.
+            // `on_target_bases` keeps the historical 1-based start (feeds
+            // qc.target_coverage); `count_bases` uses the 0-based position
+            // that matches the BED, for target_counts.tsv.
             let mut ref_pos = start;
             let mut on_target_bases: u64 = 0;
+            let mut count_bases: u64 = 0;
             for &(op, len) in record.cigar_ops() {
                 let len_i = len as i32;
                 match op {
@@ -634,6 +694,11 @@ impl QcAccumulator {
                         let ov_end = (ref_pos + len_i).min(t.end);
                         if ov_start < ov_end {
                             on_target_bases += (ov_end - ov_start) as u64;
+                        }
+                        let ov_start = (ref_pos - 1).max(t.start);
+                        let ov_end = (ref_pos - 1 + len_i).min(t.end);
+                        if ov_start < ov_end {
+                            count_bases += (ov_end - ov_start) as u64;
                         }
                         ref_pos += len_i;
                     }
@@ -650,7 +715,70 @@ impl QcAccumulator {
                 self.reads_on_target += 1;
                 counted_read = true;
             }
+            if count_bases > 0 {
+                match gene_bases.iter_mut().find(|(g, _)| *g == t.gene) {
+                    Some((_, b)) => *b += count_bases,
+                    None => gene_bases.push((t.gene, count_bases)),
+                }
+            }
         }
+
+        if gene_bases.is_empty() {
+            return;
+        }
+        let primary = (flag & 0x904) == 0;
+        let read_len: u64 = record
+            .cigar_ops()
+            .iter()
+            .filter(|(op, _)| matches!(
+                op,
+                CigarKind::Match | CigarKind::Insertion | CigarKind::SoftClip
+                    | CigarKind::SequenceMatch | CigarKind::SequenceMismatch
+            ))
+            .map(|&(_, len)| len as u64)
+            .sum();
+        for (gene, bases) in gene_bases {
+            let g = &mut self.genes[gene];
+            g.alignments += 1;
+            g.bases_all += bases;
+            if primary {
+                g.reads += 1;
+                g.bases_primary += bases;
+                g.bases_primary_sq += (bases as f64) * (bases as f64);
+                g.read_len_sum += read_len;
+            }
+        }
+    }
+
+    /// Writes `{prefix}.target_counts.tsv`: per-gene read counts over the panel
+    /// targets, one row per gene in BED order. A read counts toward a gene if
+    /// it has >= 1 aligned (M/=/X) base inside the gene's target interval(s).
+    pub fn write_target_counts(&self, path: &str) -> std::io::Result<()> {
+        let mut f = std::io::BufWriter::new(File::create(path)?);
+        writeln!(
+            f,
+            "gene\tchrom\tstart\tend\ttarget_len\treads\talignments_all\tdepth\tdepth_primary\t\
+             mean_bases_per_read\tcv_bases_per_read\tmean_read_len"
+        )?;
+        for g in &self.genes {
+            let len = g.length.max(1) as f64;
+            let (mean_b, cv_b, mean_len) = if g.reads > 0 {
+                let n = g.reads as f64;
+                let mean = g.bases_primary as f64 / n;
+                let var = (g.bases_primary_sq / n - mean * mean).max(0.0);
+                let cv = if g.reads > 1 { format!("{:.3}", var.sqrt() / mean) } else { "NA".into() };
+                (format!("{:.0}", mean), cv, format!("{:.0}", g.read_len_sum as f64 / n))
+            } else {
+                ("NA".into(), "NA".into(), "NA".into())
+            };
+            writeln!(
+                f,
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.3}\t{:.3}\t{}\t{}\t{}",
+                g.name, g.chrom, g.start, g.end, g.length, g.reads, g.alignments,
+                g.bases_all as f64 / len, g.bases_primary as f64 / len, mean_b, cv_b, mean_len
+            )?;
+        }
+        Ok(())
     }
 
     pub fn to_qc_data(&self) -> PipelineQcData {
@@ -683,5 +811,98 @@ impl QcAccumulator {
                 (name.clone(), depth)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header() -> AlignmentHeader {
+        AlignmentHeader { text: String::new(), refs: vec!["chr1".to_string()], lengths: vec![1_000_000] }
+    }
+
+    fn contigs() -> Vec<Contig> {
+        vec![Contig { name: "chr1".to_string(), accession: "NC_000001.11".to_string() }]
+    }
+
+    fn region(start: u32, end: u32, name: &str) -> BedRegion {
+        BedRegion { segment: "chr1".to_string(), start, end, name: name.to_string() }
+    }
+
+    /// `pos` is 0-based, like `AlignmentRecord::pos`.
+    fn rec(pos: i32, flag: u16, cigar: Vec<(CigarKind, usize)>) -> AlignmentRecord {
+        AlignmentRecord { ref_id: 0, pos, flag, mapq: 60, cigar, ..Default::default() }
+    }
+
+    fn m(n: usize) -> (CigarKind, usize) {
+        (CigarKind::Match, n)
+    }
+
+    fn gene<'a>(acc: &'a QcAccumulator, name: &str) -> &'a GeneCounts {
+        acc.genes.iter().find(|g| g.name == name).unwrap()
+    }
+
+    fn accumulator() -> QcAccumulator {
+        // A and C are adjacent; B is one gene split over two intervals
+        let targets = vec![
+            region(1000, 2000, "A"),
+            region(2000, 2500, "C"),
+            region(5000, 5100, "B"),
+            region(5200, 5300, "B"),
+        ];
+        let mut acc = QcAccumulator::new(&header(), &targets, &contigs());
+        acc.process(&rec(1200, 0, vec![m(100)])); // inside A: 100 bases
+        acc.process(&rec(950, 0, vec![m(100)])); // clips A's start: 50 bases
+        acc.process(&rec(1999, 0, vec![m(2)])); // last base of A + first base of C
+        acc.process(&rec(2600, 0, vec![m(100)])); // within the 5 kb margin of C, 0 bases: not counted
+        acc.process(&rec(1200, 0x100, vec![m(50)])); // secondary: alignment only
+        acc.process(&rec(1300, 0x800, vec![m(50)])); // supplementary: alignment only
+        // deletion spans all of A: 0 bases in A; 50 bases in C after the deletion
+        acc.process(&rec(900, 0, vec![m(50), (CigarKind::Deletion, 1200), m(50)]));
+        acc.process(&rec(5050, 0, vec![m(300)])); // 50 bases in B1 + 100 in B2: one read
+        // soft clip and insertion count toward read length, not toward on-gene bases
+        acc.process(&rec(1500, 0, vec![(CigarKind::SoftClip, 20), m(80), (CigarKind::Insertion, 10)]));
+        acc.process(&rec(1500, 0x4, vec![])); // unmapped with a position: ignored
+        acc
+    }
+
+    #[test]
+    fn test_target_read_counts() {
+        let acc = accumulator();
+
+        let a = gene(&acc, "A");
+        assert_eq!(a.reads, 4);
+        assert_eq!(a.alignments, 6);
+        assert_eq!(a.bases_primary, 100 + 50 + 1 + 80);
+        assert_eq!(a.bases_all, 231 + 50 + 50);
+        assert_eq!(a.read_len_sum, 100 + 100 + 2 + 110);
+
+        let c = gene(&acc, "C");
+        assert_eq!((c.reads, c.alignments, c.bases_primary), (2, 2, 1 + 50));
+
+        let b = gene(&acc, "B");
+        assert_eq!((b.reads, b.alignments, b.bases_primary), (1, 1, 150));
+        assert_eq!((b.start, b.end, b.length), (5000, 5300, 200));
+    }
+
+    #[test]
+    fn test_target_counts_tsv() {
+        let acc = accumulator();
+        let path = std::env::temp_dir().join(format!("nasvar_target_counts_{}.tsv", std::process::id()));
+        acc.write_target_counts(path.to_str().unwrap()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4); // header + A, C, B (B's two intervals merged)
+        assert!(lines[0].starts_with("gene\tchrom\tstart\tend\ttarget_len\treads\talignments_all\tdepth"));
+        // A: 331 / 1000 bases all, 231 / 1000 primary, mean 231 / 4 bases per read, mean length 312 / 4
+        let a: Vec<&str> = lines[1].split('\t').collect();
+        assert_eq!(&a[..9], &["A", "chr1", "1000", "2000", "1000", "4", "6", "0.331", "0.231"]);
+        assert_eq!(a[9], "58");
+        assert_eq!(a[11], "78");
+        let b: Vec<&str> = lines[3].split('\t').collect();
+        assert_eq!(&b[..7], &["B", "chr1", "5000", "5300", "200", "1", "1"]);
+        assert_eq!(b[10], "NA"); // CV needs >= 2 reads
     }
 }
