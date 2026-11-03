@@ -323,8 +323,36 @@ fn build_karyotype_section(md: &mut String, karyo: &Option<KaryotypeOutput>, out
     }
 }
 
+/// Focal CN, CN unadjusted for blast percentage, and the NB flag for one gene.
+fn push_focal_cn(md: &mut String, c: &CnvGeneResult, method: &str) {
+    if let Some(focal) = c.focal {
+        md.push_str(&format!(
+            "Focal {} based copy number estimate: **{}x ({:.1}x)**\n\n",
+            method, focal.round() as i64, focal
+        ));
+    }
+    if let Some(ratio) = c.focal_ratio {
+        md.push_str(&format!("Copy number unadjusted for blast percentage: **{:.1}x**\n\n", ratio));
+    }
+    if let Some(flag) = &c.focal_flag {
+        md.push_str(&format!("> **WARNING:** {}\n\n", flag));
+    }
+}
+
 fn build_cnv_section(md: &mut String, cnvs: &CnvOutput, config: Option<&PipelineConfig>) {
     md.push_str("## Focal copy-number variation\n\n");
+
+    if let Some(w) = &cnvs.warnings {
+        for line in w {
+            md.push_str(&format!("> **WARNING:** {}\n", line));
+        }
+        md.push('\n');
+    }
+    // Older results have no focal_method: they are coverage based
+    let method = match cnvs.focal_method.as_deref() {
+        Some("read_count_nb") => "read-count",
+        _ => "sequencing-depth",
+    };
 
     if let Some(cfg) = config {
         let del_set: std::collections::HashSet<&str> = cfg.genes.cnv.deletion_genes.iter().map(|s| s.as_str()).collect();
@@ -355,23 +383,13 @@ fn build_cnv_section(md: &mut String, cnvs: &CnvOutput, config: Option<&Pipeline
                     let has_dels = c.deletions.as_ref().map(|d| !d.is_empty()).unwrap_or(false);
                     if !has_dels {
                         md.push_str(&format!("### {}\n\n", gene));
-                        if let Some(focal) = c.focal {
-                            md.push_str(&format!(
-                                "Focal sequencing-depth based copy number estimate: **{}x ({:.1}x)**\n\n",
-                                focal.round() as i64, focal
-                            ));
-                        }
+                        push_focal_cn(md, c, method);
                     }
                 }
             } else {
                 md.push_str(&format!("### {}\n\n", gene));
                 if let Some(c) = cnvs.genes.get(gene.as_str()) {
-                    if let Some(focal) = c.focal {
-                        md.push_str(&format!(
-                            "Focal sequencing-depth based copy number estimate: **{}x ({:.1}x)**\n\n",
-                            focal.round() as i64, focal
-                        ));
-                    }
+                    push_focal_cn(md, c, method);
                 } else {
                     md.push_str("Not tested\n\n");
                 }
@@ -402,12 +420,7 @@ fn build_cnv_section(md: &mut String, cnvs: &CnvOutput, config: Option<&Pipeline
                     local.round() as i64, local
                 ));
             }
-            if let Some(focal) = c.focal {
-                md.push_str(&format!(
-                    "Focal sequencing-depth based copy number estimate: **{}x ({:.1}x)**\n\n",
-                    focal.round() as i64, focal
-                ));
-            }
+            push_focal_cn(md, c, method);
             let has_dels = c.deletions.as_ref().map(|d| !d.is_empty()).unwrap_or(false);
             if has_dels {
                 md.push_str("**Intragenic deletions:**\n\n");
@@ -711,6 +724,11 @@ fn build_methodology_section(md: &mut String, config: Option<&PipelineConfig>) {
             let mut focal = cfg.genes.cnv.focal_genes.clone();
             focal.sort();
             md.push_str(&format!("Focal genes: {}\n\n", focal.join(", ")));
+            md.push_str(
+                "Focal copy number is estimated from the reads on each gene's targets, relative to the \
+                 counts expected at 2n from a negative binomial fit to genes on diploid arms. p(2n) is the \
+                 two-sided negative binomial test of the gene's count under 2n.\n\n",
+            );
         }
         if !cfg.genes.cnv.deletion_genes.is_empty() {
             let mut del = cfg.genes.cnv.deletion_genes.clone();

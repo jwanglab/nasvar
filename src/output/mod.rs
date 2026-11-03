@@ -25,7 +25,7 @@ pub mod types;
 // Re-export main types for convenience
 pub use collector::OutputCollector;
 pub use types::{
-    BreakpointConsensusOutput, CnvGeneResult, CnvOutput, FusionBreakpoint,
+    BreakpointConsensusOutput, CnvGeneResult, CnvOutput, FocalNbFit, FusionBreakpoint,
     FusionBreakpointConsensus, FusionEvent, FusionsOutput, GeneInfo, ItdEvent, ItdOutput,
     KaryotypeOutput, QcOutput, SnvGeneResult, SnvOutput, StructuralVariant, UnifiedOutput,
 };

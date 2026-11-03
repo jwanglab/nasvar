@@ -4,7 +4,7 @@
   "genes": {
     "cnv": {
       "focal_genes": ["RUNX1", "CDKN2A", "CDKN2B", "ERG", "PAX5", "KMT2A", "IKZF1","INO80"],
-      "exclude_from_baseline": ["RUNX1", "CDKN2A", "CDKN2B", "IKZF1", "ERG", "PAX5", "KMT2A", "DUX4"],
+      "exclude_from_baseline": ["RUNX1", "CDKN2A", "CDKN2B", "IKZF1", "ERG", "PAX5", "KMT2A", "DUX4", "INO80"],
       "deletion_genes": ["ERG", "IKZF1", "PAX5", "KMT2A"],
       "duplication_genes": ["PAX5", "KMT2A"]
     },

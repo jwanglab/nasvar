@@ -2,6 +2,7 @@ pub mod cnv;
 pub mod coverage;
 pub mod coverage_binary;
 pub mod focal_depth;
+pub mod focal_nb;
 pub mod fusion_consensus;
 pub mod fusions;
 pub mod itd;

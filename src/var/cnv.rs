@@ -6,7 +6,8 @@ use std::io::{BufRead, BufReader};
 use crate::bam::{ContigMapper, AlignmentCoords, fix_sam_coords};
 use crate::input::AlignmentInput;
 use crate::config::{Contig, PipelineConfig, ReferenceConfig};
-use crate::output::{CnvOutput, CnvGeneResult, KaryotypeOutput, StructuralVariant};
+use crate::output::{CnvOutput, CnvGeneResult, FocalNbFit, KaryotypeOutput, StructuralVariant};
+use crate::var::focal_nb::{fit_nb, test_gene, GeneReadCount, MIN_NB_BASELINE};
 use crate::utils::bed::BedRegion;
 use log::{info, warn, debug};
 
@@ -348,6 +349,15 @@ fn calculate_local_depths_raw(
     Ok((local_depths, median))
 }
 
+/// Formats a p-value to 2 significant figures (0.052, 0.12, 1.0).
+fn sig2(p: f64) -> String {
+    if p <= 0.0 || !p.is_finite() {
+        return format!("{}", p);
+    }
+    let decimals = (1 - p.log10().floor() as i32).max(0) as usize;
+    format!("{:.*}", decimals, p)
+}
+
 /// Bundled optional parameters for CNV calling.
 pub struct CnvCallParams<'a> {
     pub coverage_file: Option<&'a str>,
@@ -355,6 +365,9 @@ pub struct CnvCallParams<'a> {
     pub karyotype: Option<&'a KaryotypeOutput>,
     pub ref_config: &'a ReferenceConfig,
     pub precomputed_focal_depths: Option<HashMap<String, f64>>,
+    /// Per-gene target read counts (from the pipeline's QC pass or
+    /// `{prefix}.target_counts.tsv`); None falls back to coverage focal CN.
+    pub target_read_counts: Option<HashMap<String, GeneReadCount>>,
 }
 
 pub fn call_cnvs(
@@ -364,7 +377,7 @@ pub fn call_cnvs(
     params: CnvCallParams<'_>,
 ) -> Result<CnvOutput, Box<dyn std::error::Error>>
 {
-    let CnvCallParams { coverage_file, blast_ratio, karyotype, ref_config, precomputed_focal_depths } = params;
+    let CnvCallParams { coverage_file, blast_ratio, karyotype, ref_config, precomputed_focal_depths, target_read_counts } = params;
     let mut result: HashMap<String, CnvGeneResult> = HashMap::new();
     let chr_mapper = ContigMapper::from_contigs(&ref_config.contigs);
 
@@ -410,10 +423,17 @@ pub fn call_cnvs(
     };
 
     // Use passed blast_ratio, or fall back to karyotype's blast_ratio
-    let effective_blast_ratio = blast_ratio.or(karyo_blast_ratio);
+    let effective_blast_ratio = blast_ratio.or(karyo_blast_ratio).map(|v| v.min(1.0));
     if let Some(br) = effective_blast_ratio {
         info!("Using blast ratio: {:.4}", br);
     }
+    // Focal CN assumes all cells are blasts when no blast ratio is available
+    let focal_br = effective_blast_ratio.filter(|&b| b > 1e-6).unwrap_or(1.0);
+    let mut warnings: Vec<String> = vec![format!(
+        "Focal copy number calculation assumes a blast percentage of {:.0}%{}.",
+        focal_br * 100.0,
+        if effective_blast_ratio.is_some() { "" } else { " (no blast ratio estimated)" }
+    )];
 
     // Determine which genes are in diploid segments (for focal depth filtering)
     let mut diploid_genes: Vec<String> = Vec::new();
@@ -439,28 +459,27 @@ pub fn call_cnvs(
     // Use exclude_from_baseline from config
     let exclude_list = &config.genes.cnv.exclude_from_baseline;
 
+    // Baseline genes: not excluded, and in a diploid segment (or, without
+    // karyotype info, not on a sex chromosome)
+    let is_baseline = |name: &str| -> bool {
+        if exclude_list.iter().any(|e| name.contains(e.as_str())) {
+            return false;
+        }
+        if !diploid_segments.is_empty() {
+            diploid_genes.iter().any(|g| g == name)
+        } else if let Some(t) = t_map.get(name) {
+            let chr_name = chr_mapper.to_chr_name(&t.segment);
+            chr_name != "chrX" && chr_name != "chrY"
+        } else {
+            true
+        }
+    };
+
     let mut filtered_depths: Vec<f64> = Vec::new();
     for (name, depth) in &focal_depths {
-        // Skip excluded genes
-        if exclude_list.iter().any(|e| name.contains(e)) {
-            continue;
+        if is_baseline(name) {
+            filtered_depths.push(*depth);
         }
-
-        // If we have diploid segment info, only use genes in diploid segments
-        if !diploid_segments.is_empty() {
-            if !diploid_genes.contains(name) {
-                continue;
-            }
-        } else {
-            // Fallback: skip sex chromosomes if no karyotype info
-            if let Some(t) = t_map.get(name.as_str()) {
-                let chr_name = chr_mapper.to_chr_name(&t.segment);
-                if chr_name == "chrX" || chr_name == "chrY" {
-                    continue;
-                }
-            }
-        }
-        filtered_depths.push(*depth);
     }
 
     filtered_depths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -509,37 +528,98 @@ pub fn call_cnvs(
         }
     );
 
-    // CNV calling logic
-    // We want to output "focal" and "local" CN for specific genes from config
+    // Focal CN from read counts: NB fit of the baseline genes' counts
     let cnv_genes = &config.genes.cnv.focal_genes;
+    let mut nb_baseline: Vec<(&str, GeneReadCount)> = target_read_counts
+        .as_ref()
+        .map(|c| c.iter().filter(|(g, _)| is_baseline(g)).map(|(g, &n)| (g.as_str(), n)).collect())
+        .unwrap_or_default();
+    // Fixed order, so the fit does not depend on HashMap iteration order
+    nb_baseline.sort_by(|a, b| a.0.cmp(b.0));
+    let nb_fit = match &target_read_counts {
+        None => {
+            warn!("No target read counts; focal CN from coverage.");
+            warnings.push(
+                "Negative binomial test not run (no target read counts). Fall back to gene coverage CN estimates.".to_string(),
+            );
+            None
+        }
+        Some(_) if nb_baseline.len() < MIN_NB_BASELINE => {
+            warn!("Only {} diploid baseline genes for the NB fit; focal CN from coverage.", nb_baseline.len());
+            warnings.push(format!(
+                "Negative binomial test not run ({} diploid baseline genes). Fall back to gene coverage CN estimates.",
+                nb_baseline.len()
+            ));
+            None
+        }
+        Some(_) => {
+            let counts: Vec<GeneReadCount> = nb_baseline.iter().map(|(_, c)| *c).collect();
+            let fit = fit_nb(&counts);
+            match fit {
+                Some(f) => info!(
+                    "Focal NB fit on {} baseline genes: {:.2} reads/10kb, offset {:.0} bp, alpha {:.4}",
+                    counts.len(), f.r * 1e4, f.l, f.alpha
+                ),
+                None => {
+                    warn!("Focal NB fit failed; focal CN from coverage.");
+                    warnings.push(format!(
+                        "Negative binomial test not run (fit failed on {} diploid baseline genes). Fall back to gene coverage CN estimates.",
+                        counts.len()
+                    ));
+                }
+            }
+            fit
+        }
+    };
 
     for g in cnv_genes {
         let mut gene_result = CnvGeneResult::default();
 
-        // Focal CN
-        if let Some(depth) = focal_depths.get(g) {
-            let cn = if let Some(br) = effective_blast_ratio {
-                // formula: focal_expected_3n = br*3*med/2 + (1-br)*med
-                // focal_delta = focal_expected_3n - med
-                // cn = (depth - med)/delta + 2
-                // Simplified:
-                // expected_3n = med * (1 + 0.5*br)
-                // delta = med * 0.5 * br
-                // cn = (depth - med) / (med*0.5*br) + 2
+        // Coverage focal CN: cn = (depth - med) / (med * 0.5 * br) + 2
+        let cov = focal_depths.get(g).map(|&depth| {
+            let ratio = 2.0 * depth / median_focal;
+            (ratio, (2.0 + (ratio - 2.0) / focal_br).max(0.0))
+        });
+        if let Some((_, cn)) = cov {
+            gene_result.focal_coverage = Some(cn);
+        }
 
-                let med = median_focal;
-                let delta = med * 0.5 * br;
-                if delta.abs() > 1e-6 {
-                    (depth - med) / delta + 2.0
+        let count = target_read_counts.as_ref().and_then(|c| c.get(g).copied());
+        match (nb_fit, count) {
+            (Some(fit), Some(count)) => {
+                // A focal gene in the baseline (e.g. INO80) is tested against a
+                // fit without it
+                let fit = if nb_baseline.iter().any(|(b, _)| *b == g.as_str()) {
+                    let others: Vec<GeneReadCount> =
+                        nb_baseline.iter().filter(|(b, _)| *b != g.as_str()).map(|(_, c)| *c).collect();
+                    fit_nb(&others).unwrap_or(fit)
                 } else {
-                    depth / med * 2.0
+                    fit
+                };
+                let t = test_gene(&fit, count);
+                // cn = 2 + 2 (reads / mu - 1) / br
+                let cn = (2.0 + (t.ratio - 2.0) / focal_br).max(0.0);
+                gene_result.focal = Some(cn);
+                gene_result.focal_ratio = Some(t.ratio);
+                gene_result.focal_p_2n = Some(t.p_2n);
+                gene_result.focal_reads = Some(t.reads);
+                gene_result.focal_expected_reads = Some(t.mu);
+                if cn.round() as i64 != 2 && t.p_2n >= 0.05 {
+                    gene_result.focal_flag = Some(format!(
+                        "Negative binomial test p(2n)={} does not support a deviation from diploid.",
+                        sig2(t.p_2n)
+                    ));
                 }
-            } else {
-                depth / median_focal * 2.0
-            };
-            // Clamp negative CN values to 0
-            let cn = if cn < 0.0 { 0.0 } else { cn };
-            gene_result.focal = Some(cn);
+            }
+            (Some(_), None) => {
+                warn!("No read count for focal gene {}", g);
+            }
+            (None, _) => {
+                if let Some((ratio, cn)) = cov {
+                    gene_result.focal = Some(cn);
+                    gene_result.focal_ratio = Some(ratio);
+                }
+            }
         }
 
         // Local CN - using raw bin depth and karyotype-based baseline
@@ -634,5 +714,27 @@ pub fn call_cnvs(
         }
     }
 
-    Ok(CnvOutput { genes: result })
+    Ok(CnvOutput {
+        genes: result,
+        focal_method: Some(if nb_fit.is_some() { "read_count_nb" } else { "coverage" }.to_string()),
+        focal_blast_ratio: Some(focal_br),
+        focal_baseline_genes: Some(if nb_fit.is_some() { nb_baseline.len() } else { filtered_depths.len() }),
+        focal_nb_fit: nb_fit.map(|f| FocalNbFit { reads_per_base: f.r, length_offset: f.l, alpha: f.alpha }),
+        warnings: Some(warnings),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sig2;
+
+    #[test]
+    fn p_values_to_two_significant_figures() {
+        assert_eq!(sig2(0.0523), "0.052");
+        assert_eq!(sig2(0.05), "0.050");
+        assert_eq!(sig2(0.1234), "0.12");
+        assert_eq!(sig2(0.61), "0.61");
+        assert_eq!(sig2(1.0), "1.0");
+        assert_eq!(sig2(0.00123), "0.0012");
+    }
 }

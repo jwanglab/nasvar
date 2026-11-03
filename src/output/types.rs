@@ -259,14 +259,70 @@ pub struct KaryotypeOutput {
 pub struct CnvOutput {
     /// CNV results per gene
     pub genes: HashMap<String, CnvGeneResult>,
+
+    /// How focal CN was estimated: "read_count_nb", or "coverage" when the NB
+    /// could not be fitted
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_method: Option<String>,
+
+    /// Blast ratio used for focal CN (1.0 when none was provided or estimated)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_blast_ratio: Option<f64>,
+
+    /// Diploid baseline genes for focal CN
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_baseline_genes: Option<usize>,
+
+    /// Negative binomial fit of the baseline genes' read counts
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_nb_fit: Option<FocalNbFit>,
+
+    /// Warnings shown under "Focal copy-number variation" in the report
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
+}
+
+/// Negative binomial fit of read counts: reads ~ NB(mu, mu + alpha mu^2),
+/// mu = reads_per_base * (target length + length_offset)
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FocalNbFit {
+    pub reads_per_base: f64,
+    pub length_offset: f64,
+    pub alpha: f64,
 }
 
 /// CNV analysis result for a single gene
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct CnvGeneResult {
-    /// Focal (gene-level) copy number estimate
+    /// Focal (gene-level) copy number estimate, adjusted for blast ratio,
+    /// clipped at 0. From read counts, or coverage if the NB was not fitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focal: Option<f64>,
+
+    /// Copy number unadjusted for blast percentage (2 * reads / expected reads at 2n, or
+    /// 2 * depth / baseline depth). Independent of blast ratio.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_ratio: Option<f64>,
+
+    /// Two-sided negative binomial p-value of the read count under 2n
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_p_2n: Option<f64>,
+
+    /// Primary reads with >= 1 aligned base in the gene's targets
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_reads: Option<u64>,
+
+    /// Expected reads at 2n under the NB fit
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_expected_reads: Option<f64>,
+
+    /// Coverage-based focal CN (the previous method), kept for comparison
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_coverage: Option<f64>,
+
+    /// Set when the rounded focal CN is not 2 but p(2n) >= 0.05
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub focal_flag: Option<String>,
 
     /// Local (region-level) copy number estimate
     #[serde(skip_serializing_if = "Option::is_none")]

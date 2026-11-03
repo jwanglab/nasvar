@@ -22,6 +22,7 @@ src/
 │   ├── mod.rs              # Variant module declarations
 │   ├── snv.rs              # SNV calling with pharmacogenomics annotation
 │   ├── cnv.rs              # CNV calling (local/focal CN + split-read deletions/duplications)
+│   ├── focal_nb.rs         # Negative binomial model of per-gene read counts (focal CN, p(2n))
 │   ├── fusions.rs          # Gene fusion detection (two-stage) with ambiguity filtering
 │   ├── fusion_consensus.rs # Breakpoint consensus sequence reconstruction
 │   ├── itd.rs              # Internal tandem duplication calling
@@ -111,7 +112,8 @@ for each record:
 - `reads_on_target` counted once per read even if it overlaps multiple targets
 - `nt_on_target` sums across all overlapping targets
 - `focal_depths()` aggregates per-target bases by gene name (sum bases / sum lengths), properly handling multiple BED entries sharing the same gene name
-- Output: `PipelineQcData` for aggregate QC metrics, `HashMap<String, f64>` for per-gene depths (consumed by CNV caller and written to `target_coverage` in result JSON)
+- Also counts, per gene, primary reads with >= 1 aligned base in the gene's targets (`target_read_counts()`, written to `{prefix}.target_counts.tsv`); these drive focal CN
+- Output: `PipelineQcData` for aggregate QC metrics, `HashMap<String, f64>` for per-gene depths (coverage fallback for focal CN; written to `target_coverage` in result JSON)
 
 ### 2. Builder Pattern (PipelineRunner)
 
@@ -207,7 +209,7 @@ Karyotype Analysis
        ▼
 CNV Calling
   ├── Uses GC-adjusted coverage for local CN
-  ├── Uses focal depths from Pass 1 for focal CN
+  ├── Uses per-gene read counts from Pass 1 for focal CN (NB test; focal depths as fallback)
   ├── Split-read deletion/duplication detection
   ├── Blast ratio adjustment (if provided or estimated)
   └── CnvOutput (accepts KaryotypeOutput directly for chromosomal context)
@@ -422,11 +424,26 @@ Affine-gap Needleman-Wunsch global sequence aligner used by the breakpoint conse
 
 **Copy number estimation**:
 - Local CN: `gene_depth / genome_median_depth` (from coverage file)
-- Focal CN: `focal_depth / genome_median_depth` (from Pass 1 accumulator)
+- Focal CN (`src/var/focal_nb.rs`), from per-gene read counts n_g (Pass 1 accumulator, or
+  `{prefix}.target_counts.tsv` for the standalone `cnv` command):
+  - Baseline genes: genes on CN-2 karyotype segments, not matching `exclude_from_baseline`
+    (without a karyotype: autosomal genes)
+  - Fit `n_g ~ NB(mu_g, mu_g + alpha mu_g^2)`, `mu_g = r (L_g + l)` on the baseline genes by maximum
+    likelihood (Nelder–Mead; l in 0–30 kb, alpha in 1e-6–1). L_g is the gene's target length. A focal gene
+    that is itself a baseline gene is tested against a fit without it.
+  - `focal_ratio = 2 n_g / mu_g` (reported as "Copy number unadjusted for blast percentage")
+  - `focal = 2 + (focal_ratio - 2) / br`, clipped at 0; br is the blast ratio, 1.0 when none is available
+  - `focal_p_2n`: two-sided NB test of n_g under mu_g. `focal_flag` is set when round(focal) != 2 and
+    `focal_p_2n >= 0.05`; the report shows p(2n) to 2 significant figures.
+  - Fallback, with a warning: fewer than 20 baseline genes, a failed fit, or no read counts. Focal CN and
+    ratio then come from coverage: `focal_ratio = 2 depth / median baseline depth`,
+    `focal = 2 + (focal_ratio - 2) / br`. `focal_coverage` always holds this coverage CN.
+- `CnvOutput.warnings` (shown under "Focal copy-number variation"): the blast percentage assumed, and the
+  fallback, if any
 
-**Blast ratio adjustment** (when tumor fraction is known):
+**Blast ratio adjustment** (local CN, when tumor fraction is known):
 ```
-adjusted_cn = (raw_cn * (1.0 - blast_ratio)) + (2.0 * blast_ratio)
+cn = (depth - cov_2n) / (cov_2n * 0.5 * blast_ratio) + 2
 ```
 
 **Structural events**:

@@ -598,6 +598,16 @@ fn main() {
                     karyotype: karyo_data.as_ref(),
                     ref_config: &ref_config,
                     precomputed_focal_depths: None,
+                    target_read_counts: {
+                        let path = format!("{}.target_counts.tsv", out_prefix);
+                        match nasvar::var::focal_nb::read_target_counts(&path) {
+                            Ok(c) => Some(c),
+                            Err(e) => {
+                                warn!("Could not read {} ({}); focal CN from coverage.", path, e);
+                                None
+                            }
+                        }
+                    },
                 },
             ) {
                 Ok(cnv_output) => {
@@ -1057,8 +1067,8 @@ fn main() {
                     None => None,
                 });
 
-            let (pipeline_output, reads_aligned, focal_depths, coverage_bins, enriched_read_quality) = match runner.run(&mut br) {
-                Ok(r) => (r.output, r.reads_aligned, r.focal_depths, r.coverage_bins, r.enriched_read_quality),
+            let (pipeline_output, reads_aligned, focal_depths, target_read_counts, coverage_bins, enriched_read_quality) = match runner.run(&mut br) {
+                Ok(r) => (r.output, r.reads_aligned, r.focal_depths, r.target_read_counts, r.coverage_bins, r.enriched_read_quality),
                 Err(e) => {
                     error!("Error in PipelineRunner: {}", e);
                     return;
@@ -1168,6 +1178,7 @@ fn main() {
                     karyotype: karyo_result.as_ref(),
                     ref_config: &ref_config,
                     precomputed_focal_depths: focal_depths,
+                    target_read_counts,
                 },
             ) {
                 Ok(cnv_output) => {

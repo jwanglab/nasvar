@@ -18,6 +18,8 @@ pub struct PipelineResult {
     pub output: UnifiedOutput,
     pub reads_aligned: Option<u64>,
     pub focal_depths: Option<HashMap<String, f64>>,
+    /// Per-gene target read counts (as in `{prefix}.target_counts.tsv`)
+    pub target_read_counts: Option<HashMap<String, crate::var::focal_nb::GeneReadCount>>,
     /// 1 Mb coverage bins from the main-BAM accumulator, ready to hand to
     /// `call_karyotype_gc_corrected_from_bins`. `None` when this run used
     /// adaptive-sampling coverage (which writes its own TSV) or lacked a
@@ -302,7 +304,7 @@ impl<'a> PipelineRunner<'a> {
                 rq.median, rq.reads
             );
         }
-        let (reads_aligned, focal_depths) = if let Some(q) = qc_acc {
+        let (reads_aligned, focal_depths, target_read_counts) = if let Some(q) = qc_acc {
             let count = as_reads_aligned.unwrap_or_else(|| q.reads_aligned());
             if as_reads_aligned.is_some() {
                 info!("Total aligned reads (primary, from AS): {}", count);
@@ -320,13 +322,13 @@ impl<'a> PipelineRunner<'a> {
             collector = collector.with_qc(qc_data);
             collector = collector.with_reads_aligned(count);
             collector = collector.with_target_coverage(fd.clone());
-            (Some(count), Some(fd))
+            (Some(count), Some(fd), Some(q.target_read_counts()))
         } else if let Some(count) = as_reads_aligned {
             info!("Total aligned reads (primary, from AS): {}", count);
             collector = collector.with_reads_aligned(count);
-            (Some(count), None)
+            (Some(count), None, None)
         } else {
-            (None, None)
+            (None, None, None)
         };
 
         // Fusion Pass 2
@@ -402,6 +404,7 @@ impl<'a> PipelineRunner<'a> {
             output: collector.build(),
             reads_aligned,
             focal_depths,
+            target_read_counts,
             coverage_bins,
             enriched_read_quality,
         })
@@ -792,6 +795,15 @@ impl QcAccumulator {
 
     pub fn reads_aligned(&self) -> u64 {
         self.reads_aligned
+    }
+
+    /// Per-gene primary read counts and target lengths, the `reads` and
+    /// `target_len` columns of `{prefix}.target_counts.tsv`.
+    pub fn target_read_counts(&self) -> HashMap<String, crate::var::focal_nb::GeneReadCount> {
+        self.genes
+            .iter()
+            .map(|g| (g.name.clone(), crate::var::focal_nb::GeneReadCount { reads: g.reads, length: g.length }))
+            .collect()
     }
 
     /// Per-gene average depth: total aligned bases / total region length,
