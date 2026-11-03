@@ -210,13 +210,63 @@ pub struct FusionBreakpoint {
 // Karyotype Output
 // ============================================================================
 
+/// Genome order of a karyotype segment name: 1p, 1q, 2p, ..., 13, ..., 22, X, Y,
+/// then anything else (e.g. PAR) by name. An optional "chr" prefix is ignored.
+fn segment_order(seg: &str) -> (u8, u8, &str) {
+    let s = seg.strip_prefix("chr").unwrap_or(seg);
+    let (chrom, arm) = match s.strip_suffix('p') {
+        Some(c) => (c, 0),
+        None => match s.strip_suffix('q') {
+            Some(c) => (c, 1),
+            None => (s, 0),
+        },
+    };
+    let rank = match chrom {
+        "X" => 23,
+        "Y" => 24,
+        c => match c.parse::<u8>() {
+            Ok(n) if (1..=22).contains(&n) => n,
+            _ => return (u8::MAX, 0, seg),
+        },
+    };
+    (rank, arm, "")
+}
+
+/// Writes a segment-keyed map in genome order (HashMap order is arbitrary).
+fn serialize_segments<S: serde::Serializer, V: Serialize>(
+    map: &HashMap<String, V>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_by(|a, b| segment_order(a.0).cmp(&segment_order(b.0)));
+    let mut m = serializer.serialize_map(Some(entries.len()))?;
+    for (k, v) in entries {
+        m.serialize_entry(k, v)?;
+    }
+    m.end()
+}
+
+/// Writes an optional map with its keys sorted.
+fn serialize_opt_sorted<S: serde::Serializer, K: Ord + Serialize, V: Serialize>(
+    map: &Option<HashMap<K, V>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match map {
+        Some(m) => serializer.collect_map(m.iter().collect::<std::collections::BTreeMap<_, _>>()),
+        None => serializer.serialize_none(),
+    }
+}
+
 /// Karyotype analysis results
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct KaryotypeOutput {
-    /// Copy number per chromosome arm (e.g., "1p" -> 2)
+    /// Copy number per chromosome arm (e.g., "1p" -> 2), written in genome order
+    #[serde(serialize_with = "serialize_segments")]
     pub karyotype: HashMap<String, usize>,
 
-    /// Median coverage per chromosome arm
+    /// Median coverage per chromosome arm, written in genome order
+    #[serde(serialize_with = "serialize_segments")]
     pub medians: HashMap<String, f64>,
 
     /// Coverage levels detected (coverage_value, copy_number)
@@ -245,8 +295,8 @@ pub struct KaryotypeOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<String>,
 
-    /// MAF peaks for copy number validation (CN -> MAF value)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// MAF peaks for copy number validation (CN -> MAF value), written by CN
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_opt_sorted")]
     pub maf_peaks: Option<HashMap<usize, f64>>,
 }
 
@@ -479,4 +529,36 @@ pub struct FusionBreakpointConsensus {
 
     /// Mean per-position coverage across the consensus
     pub mean_coverage: f64,
+}
+
+#[cfg(test)]
+mod segment_order_tests {
+    use super::*;
+
+    #[test]
+    fn karyotype_maps_serialize_in_genome_order() {
+        let segs = ["X", "22", "10q", "1q", "2p", "13", "Y", "1p", "10p", "PAR1", "21"];
+        // Built from JSON so the test does not depend on the optional fields
+        let karyo: KaryotypeOutput = serde_json::from_value(serde_json::json!({
+            "karyotype": segs.iter().map(|s| (s.to_string(), 2)).collect::<HashMap<_, _>>(),
+            "medians": segs.iter().map(|s| (s.to_string(), 1.0)).collect::<HashMap<_, _>>(),
+            "karyotype_string": "",
+            "iscn_string": "",
+            "maf_peaks": {"3": 0.33, "1": 0.0, "2": 0.5},
+        }))
+        .unwrap();
+        let json = serde_json::to_string(&karyo).unwrap();
+        let order = ["1p", "1q", "2p", "10p", "10q", "13", "21", "22", "X", "Y", "PAR1"];
+        for field in ["\"karyotype\":{", "\"medians\":{"] {
+            let body = &json[json.find(field).unwrap()..];
+            let pos: Vec<usize> = order.iter().map(|s| body.find(&format!("\"{}\":", s)).unwrap()).collect();
+            assert!(pos.windows(2).all(|w| w[0] < w[1]), "{} order wrong: {}", field, body);
+        }
+        let peaks = &json[json.find("\"maf_peaks\":").unwrap()..];
+        assert!(peaks.find("\"1\":").unwrap() < peaks.find("\"2\":").unwrap());
+        assert!(peaks.find("\"2\":").unwrap() < peaks.find("\"3\":").unwrap());
+        // Round trip is unaffected
+        let back: KaryotypeOutput = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.karyotype.len(), segs.len());
+    }
 }
