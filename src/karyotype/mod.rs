@@ -1205,14 +1205,26 @@ pub fn call_karyotype_from_bins(
         cn_depths_auto.entry(cn).or_default().push(*med);
     }
 
-    let blast_ratio = estimate_blast_ratio(&cn_depths_auto);
+    let mut blast_ratio = estimate_blast_ratio(&cn_depths_auto);
+    let mut blast_ratio_source = None;
+    let mut blast_ratio_event = None;
     if let Some(br) = blast_ratio {
         info!("Estimated blast ratio: {:.4}", br);
+        blast_ratio_source = Some("autosomes".to_string());
         if br < LOW_BLAST_RATIO {
             let w = "Estimated blast ratio is low. This could indicate subclonal CNV.".to_string();
             warn!("{}", w);
             warnings.push(w);
+        } else if br > 1.0 {
+            let w = "Estimated blast ratio is above 100%. Copy number levels may be misassigned.".to_string();
+            warn!("{}", w);
+            warnings.push(w);
         }
+    } else if let Some((br, event)) = estimate_sex_chr_blast_ratio(&karyotype, &medians) {
+        info!("Estimated blast ratio from sex chromosomes ({}): {:.4}", event, br);
+        blast_ratio = Some(br);
+        blast_ratio_source = Some("sex_chromosomes".to_string());
+        blast_ratio_event = Some(event.to_string());
     } else {
         warn!("Could not estimate blast ratio (insufficient data).");
     }
@@ -1237,6 +1249,8 @@ pub fn call_karyotype_from_bins(
         within_segment_spread: Some(spread),
         warnings: if warnings.is_empty() { None } else { Some(warnings.join("\n")) },
         maf_peaks: levels_maf_peaks,
+        blast_ratio_source,
+        blast_ratio_event,
     })
 }
 
@@ -1293,7 +1307,12 @@ const MAF_PEAK_CLOSE_WARN: f64 = 0.03;
 const MAF_PEAK_TIE: f64 = 0.01;
 /// Estimated blast ratios below this carry a warning: the CNV may be
 /// subclonal rather than present in all blasts.
-const LOW_BLAST_RATIO: f64 = 0.3;
+const LOW_BLAST_RATIO: f64 = 0.2;
+/// Sex chromosome blast ratios below this are not reported.
+const MIN_SEX_CHR_BLAST_RATIO: f64 = 0.2;
+/// For 45,X, a loss-of-X or loss-of-Y blast ratio above this is implausible
+/// (too few normal cells for the copies observed); exactly one of the two must be.
+const MAX_45X_BLAST_RATIO: f64 = 0.9;
 
 fn resolve_cn_states(
     levels: &[(f64, usize)],
@@ -1483,8 +1502,78 @@ fn estimate_blast_ratio(cn_depths: &HashMap<usize, Vec<f64>>) -> Option<f64> {
         return Some(ratio);
     }
 
-    debug!("There is only autosomal diploid, we cannot estimate blast ratio");
+    debug!("There is only autosomal diploid. Cannot estimate blast ratio from autosomes.");
     None
+}
+
+/// Blast ratio from the sex chromosomes, for karyotypes whose autosomes are all
+/// 2n (so the autosomes give none). Returns the ratio and the event it rests on.
+/// cX and cY are copies relative to the mean autosomal 2n median (one copy =
+/// mean / 2), and each event is cn = (1 - b) * normal + b * blast:
+///   45,X      loss of X (XX -> X, b = 2 - cX) or loss of Y (XY -> X, b = 1 - cY).
+///             Exactly one must exceed MAX_45X_BLAST_RATIO; the other is used.
+///   47,XY,+X  gain of X (XY -> XXY), b = cX - 1
+/// Ratios below MIN_SEX_CHR_BLAST_RATIO or above 1 are dropped.
+fn estimate_sex_chr_blast_ratio(
+    karyotype: &HashMap<String, usize>,
+    medians: &HashMap<String, f64>,
+) -> Option<(f64, &'static str)> {
+    let is_autosome = |chr: &str| !chr.contains("X") && !chr.contains("Y") && !chr.contains("M") && !chr.contains("PAR");
+    if karyotype.iter().any(|(chr, &cn)| is_autosome(chr) && cn != 2) {
+        debug!("Sex chromosome blast ratio: autosomes not all 2n, skipping");
+        return None;
+    }
+    let cn2_depths: Vec<f64> = karyotype
+        .keys()
+        .filter(|chr| is_autosome(chr))
+        .filter_map(|chr| medians.get(chr).copied())
+        .collect();
+    if cn2_depths.is_empty() {
+        debug!("Sex chromosome blast ratio: no autosomal 2n segments, skipping");
+        return None;
+    }
+    let one_copy = cn2_depths.iter().sum::<f64>() / cn2_depths.len() as f64 / 2.0;
+    let cx = medians.get("X").map(|m| m / one_copy).unwrap_or(0.0);
+    let cy = medians.get("Y").map(|m| m / one_copy).unwrap_or(0.0);
+    let x = karyotype.get("X").copied().unwrap_or(0);
+    let y = karyotype.get("Y").copied().unwrap_or(0);
+    debug!("Sex chromosome blast ratio: X {}n ({:.3} copies), Y {}n ({:.3} copies)", x, cx, y, cy);
+
+    let (br, event) = match (x, y) {
+        (1, 0) => {
+            let (b_x, b_y) = (2.0 - cx, 1.0 - cy);
+            debug!("45,X: loss of X gives {:.4}, loss of Y gives {:.4}", b_x, b_y);
+            if b_y > MAX_45X_BLAST_RATIO && b_x <= MAX_45X_BLAST_RATIO {
+                (b_x, "loss of X")
+            } else if b_x > MAX_45X_BLAST_RATIO && b_y <= MAX_45X_BLAST_RATIO {
+                (b_y, "loss of Y")
+            } else {
+                debug!(
+                    "45,X: need exactly one of loss of X / loss of Y above {}, discarding",
+                    MAX_45X_BLAST_RATIO
+                );
+                return None;
+            }
+        }
+        (2, 1) => {
+            let b_x = cx - 1.0;
+            debug!("47,XY,+X: gain of X gives {:.4}", b_x);
+            (b_x, "gain of X")
+        }
+        _ => {
+            debug!("Sex chromosome blast ratio: X {}n / Y {}n is not 45,X or 47,XY,+X, skipping", x, y);
+            return None;
+        }
+    };
+
+    if !(MIN_SEX_CHR_BLAST_RATIO..=1.0).contains(&br) {
+        debug!(
+            "Sex chromosome blast ratio {:.4} ({}) outside [{}, 1], discarding",
+            br, event, MIN_SEX_CHR_BLAST_RATIO
+        );
+        return None;
+    }
+    Some((br, event))
 }
 
 // --------------------------------------------------------------------------------
@@ -2070,5 +2159,75 @@ mod median_tests {
     #[test]
     fn empty_slice_is_zero() {
         assert_eq!(median_sorted(&[]), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod sex_chr_blast_tests {
+    use super::*;
+
+    /// Two autosomes at 2n (coverage 200, so one copy = 100) plus X and Y given
+    /// as (called CN, observed copies).
+    fn estimate(x: (usize, f64), y: (usize, f64)) -> Option<(f64, &'static str)> {
+        let mut karyotype = HashMap::from([("1p".to_string(), 2), ("2q".to_string(), 2)]);
+        let mut medians = HashMap::from([("1p".to_string(), 200.0), ("2q".to_string(), 200.0)]);
+        for (chr, (cn, copies)) in [("X", x), ("Y", y)] {
+            karyotype.insert(chr.to_string(), cn);
+            medians.insert(chr.to_string(), copies * 100.0);
+        }
+        estimate_sex_chr_blast_ratio(&karyotype, &medians).map(|(b, e)| ((b * 1000.0).round() / 1000.0, e))
+    }
+
+    #[test]
+    fn x45_loss_of_x() {
+        assert_eq!(estimate((1, 1.46), (0, 0.0)), Some((0.54, "loss of X")));
+        assert_eq!(estimate((1, 1.382), (0, 0.07)), Some((0.618, "loss of X")));
+    }
+
+    #[test]
+    fn x45_loss_of_y() {
+        assert_eq!(estimate((1, 0.992), (0, 0.207)), Some((0.793, "loss of Y")));
+    }
+
+    #[test]
+    fn x45_discarded_unless_exactly_one_model_is_implausible() {
+        // both below 0.9: loss of X 0.5, loss of Y 0.5
+        assert_eq!(estimate((1, 1.5), (0, 0.5)), None);
+        // both above 0.9: X ~1 and no Y
+        assert_eq!(estimate((1, 1.0), (0, 0.0)), None);
+    }
+
+    #[test]
+    fn xy_plus_x_gain_of_x() {
+        assert_eq!(estimate((2, 1.58), (1, 1.012)), Some((0.58, "gain of X")));
+    }
+
+    #[test]
+    fn xx_with_y_gives_nothing() {
+        assert_eq!(estimate((2, 1.766), (0, 0.246)), None);
+    }
+
+    #[test]
+    fn below_twenty_percent_or_above_one_is_dropped() {
+        assert_eq!(estimate((2, 1.15), (1, 1.0)), None);
+        assert_eq!(estimate((2, 2.2), (1, 1.0)), None);
+    }
+
+    #[test]
+    fn normal_or_other_sex_karyotypes_give_nothing() {
+        assert_eq!(estimate((2, 1.97), (0, 0.01)), None);
+        assert_eq!(estimate((1, 1.0), (1, 1.0)), None);
+        assert_eq!(estimate((3, 2.7), (0, 0.0)), None);
+    }
+
+    #[test]
+    fn any_non_diploid_autosome_gives_nothing() {
+        let karyotype = HashMap::from([
+            ("1p".to_string(), 2), ("2q".to_string(), 3), ("X".to_string(), 2), ("Y".to_string(), 1),
+        ]);
+        let medians = HashMap::from([
+            ("1p".to_string(), 200.0), ("2q".to_string(), 300.0), ("X".to_string(), 158.0), ("Y".to_string(), 100.0),
+        ]);
+        assert_eq!(estimate_sex_chr_blast_ratio(&karyotype, &medians), None);
     }
 }

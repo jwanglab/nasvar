@@ -298,6 +298,14 @@ pub struct KaryotypeOutput {
     /// MAF peaks for copy number validation (CN -> MAF value), written by CN
     #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_opt_sorted")]
     pub maf_peaks: Option<HashMap<usize, f64>>,
+
+    /// Where blast_ratio came from: "autosomes" or "sex_chromosomes"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blast_ratio_source: Option<String>,
+
+    /// Sex chromosome event behind a sex_chromosomes blast_ratio, e.g. "loss of Y"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blast_ratio_event: Option<String>,
 }
 
 // ============================================================================

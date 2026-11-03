@@ -291,6 +291,16 @@ fn format_breakpoints(bps: &[FusionBreakpoint]) -> String {
         .join("; ")
 }
 
+/// " (estimated from sex chromosomes: loss of Y)" for a sex chromosome blast
+/// ratio; empty for one from the autosomes.
+fn blast_ratio_basis(k: &KaryotypeOutput) -> String {
+    match (k.blast_ratio_source.as_deref(), k.blast_ratio_event.as_deref()) {
+        (Some("sex_chromosomes"), Some(event)) => format!(" (estimated from sex chromosomes: {})", event),
+        (Some("sex_chromosomes"), None) => " (estimated from sex chromosomes)".to_string(),
+        _ => String::new(),
+    }
+}
+
 fn build_karyotype_section(md: &mut String, karyo: &Option<KaryotypeOutput>, out_prefix: &str) {
     md.push_str("## Inferred Full Chromosome or Arm Level Gain or Loss\n\n");
 
@@ -307,7 +317,11 @@ fn build_karyotype_section(md: &mut String, karyo: &Option<KaryotypeOutput>, out
             md.push_str(&format!("ISCN nomenclature: **{}**\n\n", k.iscn_string));
         }
         if let Some(br) = k.blast_ratio {
-            md.push_str(&format!("Blast ratio (tumor fraction): **{:.2}%**\n\n", br * 100.0));
+            md.push_str(&format!(
+                "Blast ratio (tumor fraction): **{:.2}%**{}\n\n",
+                br * 100.0,
+                blast_ratio_basis(k)
+            ));
         }
 
         // Karyotype + BAF plot (prefer GC-corrected with BAF)
@@ -1094,7 +1108,7 @@ fn print_stdout_summary(
         println!("Karyotype: {}", k.karyotype_string);
         println!("ISCN:      {}", k.iscn_string);
         if let Some(br) = k.blast_ratio {
-            println!("Blast Ratio: {:.2}%", br * 100.0);
+            println!("Blast Ratio: {:.2}%{}", br * 100.0, blast_ratio_basis(k));
         }
         println!();
     }
