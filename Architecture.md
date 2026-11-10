@@ -431,15 +431,18 @@ Affine-gap Needleman-Wunsch global sequence aligner used by the breakpoint conse
   - Fit `n_g ~ NB(mu_g, mu_g + alpha mu_g^2)`, `mu_g = r (L_g + l)` on the baseline genes by maximum
     likelihood (Nelder–Mead; l in 0–30 kb, alpha in 1e-6–1). L_g is the gene's target length. A focal gene
     that is itself a baseline gene is tested against a fit without it.
-  - `focal_ratio = 2 n_g / mu_g` (reported as "Copy number unadjusted for blast percentage")
-  - `focal = 2 + (focal_ratio - 2) / br`, clipped at 0; br is the blast ratio, 1.0 when none is available
+  - `focal = 2 + 2 (n_g / mu_g - 1) / br`, clipped at 0; br is the blast ratio, 1.0 when none is available
   - `focal_p_2n`: two-sided NB test of n_g under mu_g. `focal_flag` is set when round(focal) != 2 and
-    `focal_p_2n >= 0.05`; the report shows p(2n) to 2 significant figures.
-  - Fallback, with a warning: fewer than 20 baseline genes, a failed fit, or no read counts. Focal CN and
-    ratio then come from coverage: `focal_ratio = 2 depth / median baseline depth`,
-    `focal = 2 + (focal_ratio - 2) / br`. `focal_coverage` always holds this coverage CN.
-- `CnvOutput.warnings` (shown under "Focal copy-number variation"): the blast percentage assumed, and the
-  fallback, if any
+    `focal_p_2n >= 0.05`; the report shows the flag text without the p-value.
+  - Fallback, with a warning: fewer than 20 baseline genes, a failed fit, or no read counts. Focal CN then
+    comes from coverage: `focal = 2 + 2 (depth / median baseline depth - 1) / br`. `focal_coverage` always
+    holds this coverage CN.
+- `CnvOutput.notes` (shown as "Note:" under "Focal copy-number variation"): the blast percentage assumed.
+  Below 50% it adds "Low blast percentage: verify against an independent blast estimate (e.g. flow
+  cytometry) and rerun with --blast-ratio if needed." and the report shows the note in red.
+- `CnvOutput.warnings` (shown as "WARNING:", in red): "Focal copy number calculation assumes a blast
+  percentage of 100% (no blast ratio estimated)." when there is no blast ratio (instead of the note), and
+  the coverage fallback, if any
 
 **Blast ratio adjustment** (local CN, when tumor fraction is known):
 ```

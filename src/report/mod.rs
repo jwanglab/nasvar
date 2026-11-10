@@ -337,16 +337,13 @@ fn build_karyotype_section(md: &mut String, karyo: &Option<KaryotypeOutput>, out
     }
 }
 
-/// Focal CN, CN unadjusted for blast percentage, and the NB flag for one gene.
+/// Focal CN and the NB flag for one gene.
 fn push_focal_cn(md: &mut String, c: &CnvGeneResult, method: &str) {
     if let Some(focal) = c.focal {
         md.push_str(&format!(
             "Focal {} based copy number estimate: **{}x ({:.1}x)**\n\n",
             method, focal.round() as i64, focal
         ));
-    }
-    if let Some(ratio) = c.focal_ratio {
-        md.push_str(&format!("Copy number unadjusted for blast percentage: **{:.1}x**\n\n", ratio));
     }
     if let Some(flag) = &c.focal_flag {
         md.push_str(&format!("> **WARNING:** {}\n\n", flag));
@@ -356,6 +353,19 @@ fn push_focal_cn(md: &mut String, c: &CnvGeneResult, method: &str) {
 fn build_cnv_section(md: &mut String, cnvs: &CnvOutput, config: Option<&PipelineConfig>) {
     md.push_str("## Focal copy-number variation\n\n");
 
+    if let Some(notes) = &cnvs.notes {
+        // At a low blast percentage the note is shown in red (blockquote)
+        let red = cnvs
+            .focal_blast_ratio
+            .is_some_and(|b| b < crate::var::cnv::LOW_FOCAL_BLAST_RATIO);
+        for line in notes {
+            if red {
+                md.push_str(&format!("> **Note:** {}\n\n", line));
+            } else {
+                md.push_str(&format!("**Note:** {}\n\n", line));
+            }
+        }
+    }
     if let Some(w) = &cnvs.warnings {
         for line in w {
             md.push_str(&format!("> **WARNING:** {}\n", line));

@@ -51,8 +51,6 @@ pub struct NbGeneTest {
     pub reads: u64,
     /// Expected reads at 2n
     pub mu: f64,
-    /// 2 * reads / mu: CN if all cells carry the change
-    pub ratio: f64,
     /// Two-sided p-value of the count under 2n
     pub p_2n: f64,
 }
@@ -62,7 +60,6 @@ pub fn test_gene(fit: &NbFit, count: GeneReadCount) -> NbGeneTest {
     NbGeneTest {
         reads: count.reads,
         mu,
-        ratio: 2.0 * count.reads as f64 / mu,
         p_2n: two_sided_p(count.reads, mu, fit.alpha),
     }
 }

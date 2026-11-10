@@ -349,14 +349,9 @@ fn calculate_local_depths_raw(
     Ok((local_depths, median))
 }
 
-/// Formats a p-value to 2 significant figures (0.052, 0.12, 1.0).
-fn sig2(p: f64) -> String {
-    if p <= 0.0 || !p.is_finite() {
-        return format!("{}", p);
-    }
-    let decimals = (1 - p.log10().floor() as i32).max(0) as usize;
-    format!("{:.*}", decimals, p)
-}
+/// Blast ratios below this make the focal note ask to check other blast
+/// estimates, and the report shows the note in red.
+pub const LOW_FOCAL_BLAST_RATIO: f64 = 0.5;
 
 /// Bundled optional parameters for CNV calling.
 pub struct CnvCallParams<'a> {
@@ -429,11 +424,28 @@ pub fn call_cnvs(
     }
     // Focal CN assumes all cells are blasts when no blast ratio is available
     let focal_br = effective_blast_ratio.filter(|&b| b > 1e-6).unwrap_or(1.0);
-    let mut warnings: Vec<String> = vec![format!(
-        "Focal copy number calculation assumes a blast percentage of {:.0}%{}.",
-        focal_br * 100.0,
-        if effective_blast_ratio.is_some() { "" } else { " (no blast ratio estimated)" }
-    )];
+    // Blast percentage assumed: a note when a blast ratio is available, a
+    // warning when 100% is assumed for lack of one
+    let mut notes: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    if effective_blast_ratio.is_some() {
+        let mut note = format!(
+            "Focal copy number calculation assumes a blast percentage of {:.0}%.",
+            focal_br * 100.0
+        );
+        if focal_br < LOW_FOCAL_BLAST_RATIO {
+            note.push_str(
+                " Low blast percentage: verify against an independent blast estimate (e.g. flow cytometry) \
+                 and rerun with --blast-ratio if needed.",
+            );
+        }
+        notes.push(note);
+    } else {
+        warnings.push(
+            "Focal copy number calculation assumes a blast percentage of 100% (no blast ratio estimated)."
+                .to_string(),
+        );
+    }
 
     // Determine which genes are in diploid segments (for focal depth filtering)
     let mut diploid_genes: Vec<String> = Vec::new();
@@ -576,11 +588,10 @@ pub fn call_cnvs(
         let mut gene_result = CnvGeneResult::default();
 
         // Coverage focal CN: cn = (depth - med) / (med * 0.5 * br) + 2
-        let cov = focal_depths.get(g).map(|&depth| {
-            let ratio = 2.0 * depth / median_focal;
-            (ratio, (2.0 + (ratio - 2.0) / focal_br).max(0.0))
-        });
-        if let Some((_, cn)) = cov {
+        let cov = focal_depths
+            .get(g)
+            .map(|&depth| (2.0 + 2.0 * (depth / median_focal - 1.0) / focal_br).max(0.0));
+        if let Some(cn) = cov {
             gene_result.focal_coverage = Some(cn);
         }
 
@@ -598,26 +609,23 @@ pub fn call_cnvs(
                 };
                 let t = test_gene(&fit, count);
                 // cn = 2 + 2 (reads / mu - 1) / br
-                let cn = (2.0 + (t.ratio - 2.0) / focal_br).max(0.0);
+                let cn = (2.0 + 2.0 * (t.reads as f64 / t.mu - 1.0) / focal_br).max(0.0);
                 gene_result.focal = Some(cn);
-                gene_result.focal_ratio = Some(t.ratio);
                 gene_result.focal_p_2n = Some(t.p_2n);
                 gene_result.focal_reads = Some(t.reads);
                 gene_result.focal_expected_reads = Some(t.mu);
                 if cn.round() as i64 != 2 && t.p_2n >= 0.05 {
-                    gene_result.focal_flag = Some(format!(
-                        "Negative binomial test p(2n)={} does not support a deviation from diploid.",
-                        sig2(t.p_2n)
-                    ));
+                    gene_result.focal_flag = Some(
+                        "Low confidence in this copy number change.".to_string(),
+                    );
                 }
             }
             (Some(_), None) => {
                 warn!("No read count for focal gene {}", g);
             }
             (None, _) => {
-                if let Some((ratio, cn)) = cov {
+                if let Some(cn) = cov {
                     gene_result.focal = Some(cn);
-                    gene_result.focal_ratio = Some(ratio);
                 }
             }
         }
@@ -720,21 +728,7 @@ pub fn call_cnvs(
         focal_blast_ratio: Some(focal_br),
         focal_baseline_genes: Some(if nb_fit.is_some() { nb_baseline.len() } else { filtered_depths.len() }),
         focal_nb_fit: nb_fit.map(|f| FocalNbFit { reads_per_base: f.r, length_offset: f.l, alpha: f.alpha }),
-        warnings: Some(warnings),
+        notes: if notes.is_empty() { None } else { Some(notes) },
+        warnings: if warnings.is_empty() { None } else { Some(warnings) },
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::sig2;
-
-    #[test]
-    fn p_values_to_two_significant_figures() {
-        assert_eq!(sig2(0.0523), "0.052");
-        assert_eq!(sig2(0.05), "0.050");
-        assert_eq!(sig2(0.1234), "0.12");
-        assert_eq!(sig2(0.61), "0.61");
-        assert_eq!(sig2(1.0), "1.0");
-        assert_eq!(sig2(0.00123), "0.0012");
-    }
 }

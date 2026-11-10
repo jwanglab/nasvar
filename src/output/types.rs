@@ -335,7 +335,13 @@ pub struct CnvOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focal_nb_fit: Option<FocalNbFit>,
 
-    /// Warnings shown under "Focal copy-number variation" in the report
+    /// Notes shown under "Focal copy-number variation" in the report: blast
+    /// percentage assumed (below 50% also asks to check it, shown in red)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<String>>,
+
+    /// Warnings shown under "Focal copy-number variation" in the report: 100%
+    /// blast assumed for lack of an estimate, coverage fallback
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
 }
@@ -357,11 +363,6 @@ pub struct CnvGeneResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focal: Option<f64>,
 
-    /// Copy number unadjusted for blast percentage (2 * reads / expected reads at 2n, or
-    /// 2 * depth / baseline depth). Independent of blast ratio.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub focal_ratio: Option<f64>,
-
     /// Two-sided negative binomial p-value of the read count under 2n
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focal_p_2n: Option<f64>,
@@ -378,7 +379,8 @@ pub struct CnvGeneResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focal_coverage: Option<f64>,
 
-    /// Set when the rounded focal CN is not 2 but p(2n) >= 0.05
+    /// Set when the rounded focal CN is not 2 but p(2n) >= 0.05 (shown in the
+    /// report; the p-value itself is only in focal_p_2n)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focal_flag: Option<String>,
 
