@@ -95,7 +95,12 @@ enum Commands {
         #[arg(short, long)]
         force: bool,
     },
-    /// Call Copy Number Variants
+    /// Call copy number variants (focal CN, local CN, intragenic deletions/duplications)
+    ///
+    /// Focal CN of each config focal gene comes from its target read counts: a negative
+    /// binomial fitted to the baseline genes (genes on 2n arms of the --karyotype result,
+    /// or every autosomal gene without one) gives the expected count at 2n, and each gene
+    /// gets a blast-ratio-adjusted CN and a p-value against 2n.
     Cnv {
         /// Alignment file (BAM/CRAM/SAM) or a .txt/.list file of paths. Must be sorted and indexed (.bai/.crai).
         #[arg(long, required = true)]
@@ -106,16 +111,30 @@ enum Commands {
         /// BED file containing target regions (e.g., exons, capture targets).
         #[arg(long, required = true)]
         targets: String,
-        /// Prefix for output files (e.g., "results/sample1"). Output files will be named <prefix>.result.json.
+        /// Prefix for output files (e.g., "results/sample1"): writes <prefix>.cnv_result.json, and
+        /// <prefix>.target_counts.tsv when reads are counted from the BAM.
         #[arg(long, required = true)]
         out_prefix: String,
         /// Force overwrite of existing output files.
         #[arg(short, long)]
         force: bool,
-        /// Path to coverage.tsv file (from 'coverage' command) for local CN calculation.
+        /// result.json with a karyotype, from `nasvar pipeline` or `nasvar karyotype`. Its
+        /// 2n arms define the focal CN baseline genes, and its blast ratio is used unless
+        /// --blast-ratio is given. Without it, the baseline is every autosomal gene.
+        #[arg(long)]
+        karyotype: Option<String>,
+        /// Binned coverage.tsv for local CN (the GC-corrected column is used when present,
+        /// as written by the pipeline or `karyotype`). Local CN is computed only when focal CN
+        /// falls back to coverage, and shown in the report for genes.cnv.local_cn_genes.
         #[arg(long)]
         coverage: Option<String>,
-        /// BLAST ratio (tumor fraction) for CN adjustment (0.0 - 1.0).
+        /// Per-gene target read counts for focal CN (columns gene, target_len, reads).
+        /// Default: <out-prefix>.target_counts.tsv if it exists (written by the
+        /// pipeline); otherwise reads are counted from the BAM and saved there.
+        #[arg(long)]
+        target_counts: Option<String>,
+        /// Blast ratio (tumor fraction, 0.0 - 1.0) for CN adjustment; overrides the
+        /// karyotype estimate.
         #[arg(long)]
         blast_ratio: Option<f64>,
         /// Path to pipeline configuration JSON file (genes, thresholds).
@@ -279,7 +298,8 @@ enum Commands {
         /// Force overwrite of existing output files.
         #[arg(short, long)]
         force: bool,
-        /// BLAST ratio (tumor fraction) for CN adjustment (0.0 - 1.0).
+        /// Blast ratio (tumor fraction, 0.0 - 1.0) for CN adjustment; overrides the
+        /// karyotype estimate.
         #[arg(long)]
         blast_ratio: Option<f64>,
         /// Path to pipeline configuration JSON file (genes, thresholds, SNV transcripts, one-sided genes).
@@ -534,12 +554,14 @@ fn main() {
             targets,
             out_prefix,
             force,
+            karyotype,
             coverage,
+            target_counts,
             blast_ratio,
             config,
             reference,
         } => {
-            if let Err(e) = check_output_paths(out_prefix, &[".result.json"], *force) {
+            if let Err(e) = check_output_paths(out_prefix, &[".cnv_result.json"], *force) {
                 error!("{}", e);
                 return;
             }
@@ -579,14 +601,68 @@ fn main() {
                 }
             };
             let t_vec = filter_regions_present_in_bam(t_vec, &br.contig_mapper, "targets BED");
-            // Try to load karyotype from output
-            let unified_path = format!("{}.result.json", out_prefix);
-            let karyo_data = if std::path::Path::new(&unified_path).exists() {
-                UnifiedOutput::load_json(&unified_path)
-                    .ok()
-                    .and_then(|u| u.karyotype)
-            } else {
-                None
+            // Karyotype only from an explicit --karyotype result.json
+            let karyo_data = match karyotype {
+                Some(path) => match UnifiedOutput::load_json(path) {
+                    Ok(u) => match u.karyotype {
+                        Some(k) => {
+                            info!("Karyotype from {}: {}", path, k.karyotype_string);
+                            Some(k)
+                        }
+                        None => {
+                            error!("--karyotype {} has no karyotype section", path);
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        error!("Could not read --karyotype {}: {}", path, e);
+                        return;
+                    }
+                },
+                None => {
+                    warn!("No --karyotype given: focal CN baseline uses all autosomal genes.");
+                    None
+                }
+            };
+            // An explicit --target-counts must be readable; the default
+            // <prefix>.target_counts.tsv may be missing (coverage fallback)
+            let target_read_counts = match target_counts {
+                Some(path) => match nasvar::var::focal_nb::read_target_counts(path) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        error!("Could not read --target-counts {}: {}", path, e);
+                        return;
+                    }
+                },
+                None => {
+                    let path = format!("{}.target_counts.tsv", out_prefix);
+                    if std::path::Path::new(&path).exists() {
+                        match nasvar::var::focal_nb::read_target_counts(&path) {
+                            Ok(c) => Some(c),
+                            Err(e) => {
+                                error!("Could not read {}: {}", path, e);
+                                return;
+                            }
+                        }
+                    } else {
+                        // Not written by a pipeline run: count from the BAM and save it
+                        info!("{} not found; counting target reads from the BAM...", path);
+                        match nasvar::var::focal_nb::count_target_reads(&mut br, &t_vec) {
+                            Ok(rows) => {
+                                if let Err(e) = nasvar::var::focal_nb::write_target_counts(&path, &rows) {
+                                    warn!("Could not write {}: {}", path, e);
+                                } else {
+                                    info!("Wrote per-gene target read counts to {}", path);
+                                }
+                                Some(rows.into_iter().collect())
+                            }
+                            Err(e) => {
+                                warn!("Could not count target reads ({}); focal CN from coverage.", e);
+                                None
+                            }
+                        }
+                    }
+                }
             };
             match call_cnvs(
                 &mut br,
@@ -598,22 +674,19 @@ fn main() {
                     karyotype: karyo_data.as_ref(),
                     ref_config: &ref_config,
                     precomputed_focal_depths: None,
-                    target_read_counts: {
-                        let path = format!("{}.target_counts.tsv", out_prefix);
-                        match nasvar::var::focal_nb::read_target_counts(&path) {
-                            Ok(c) => Some(c),
-                            Err(e) => {
-                                warn!("Could not read {} ({}); focal CN from coverage.", path, e);
-                                None
-                            }
-                        }
-                    },
+                    target_read_counts,
                 },
             ) {
                 Ok(cnv_output) => {
-                    let collector = OutputCollector::new().with_cnv(cnv_output);
-                    if let Err(e) = collector.write_to_prefix(out_prefix) {
-                        error!("Error writing output: {}", e);
+                    // Keep the karyotype used alongside the CNV results
+                    let mut collector = OutputCollector::new().with_cnv(cnv_output);
+                    if let Some(k) = karyo_data {
+                        collector = collector.with_karyotype(k);
+                    }
+                    let out_path = format!("{}.cnv_result.json", out_prefix);
+                    match collector.build().write_json(&out_path) {
+                        Ok(()) => info!("Wrote {}", out_path),
+                        Err(e) => error!("Error writing {}: {}", out_path, e),
                     }
                 }
                 Err(e) => error!("Error calling CNVs: {}", e),

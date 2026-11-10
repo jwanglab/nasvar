@@ -7,10 +7,14 @@
 //! r, l and alpha are fitted by maximum likelihood on the diploid baseline
 //! genes; a focal gene's count is then compared with its expected count at 2n.
 
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader, Write};
 
+use log::warn;
+
+use crate::input::{AlignmentInput, AlignmentRecord, CigarKind};
 use crate::karyotype::peakfit::ln_gamma;
+use crate::utils::bed::BedRegion;
 
 /// Fewer baseline genes than this and the NB is not fitted.
 pub const MIN_NB_BASELINE: usize = 20;
@@ -235,6 +239,104 @@ fn nelder_mead<F: Fn(&[f64; 3]) -> f64>(f: F, x0: [f64; 3], maxiter: usize, xato
         sort(&mut sim, &mut fsim);
     }
     sim[0]
+}
+
+/// True for a primary alignment (not unmapped, secondary or supplementary):
+/// only these count toward a gene's reads.
+pub fn is_primary(record: &AlignmentRecord) -> bool {
+    record.flags() & 0x904 == 0
+}
+
+/// True if the record has >= 1 aligned (M/=/X) base in the 0-based, half-open
+/// interval [start, end), the rule for counting a read toward a gene.
+pub fn has_aligned_base_in(record: &AlignmentRecord, start: u32, end: u32) -> bool {
+    if record.pos < 0 {
+        return false;
+    }
+    let mut ref_pos = record.pos as i64;
+    for &(op, len) in record.cigar_ops() {
+        let len = len as i64;
+        match op {
+            CigarKind::Match | CigarKind::SequenceMatch | CigarKind::SequenceMismatch => {
+                if ref_pos.max(start as i64) < (ref_pos + len).min(end as i64) {
+                    return true;
+                }
+                ref_pos += len;
+            }
+            CigarKind::Deletion | CigarKind::Skip => ref_pos += len,
+            _ => {}
+        }
+        if ref_pos >= end as i64 {
+            break;
+        }
+    }
+    false
+}
+
+/// Counts reads per gene from an indexed BAM by region queries, with the same
+/// rule as the pipeline's single pass: a primary alignment with >= 1 aligned
+/// base in one of the gene's BED intervals, counted once per gene (by read
+/// name). Returns genes in BED order. Used by `nasvar cnv` when no
+/// `target_counts.tsv` is available.
+pub fn count_target_reads(
+    bam: &mut AlignmentInput,
+    targets: &[BedRegion],
+) -> Result<Vec<(String, GeneReadCount)>, Box<dyn std::error::Error>> {
+    // Group BED intervals by gene name, in BED order
+    let mut order: Vec<String> = Vec::new();
+    let mut intervals: HashMap<&str, Vec<&BedRegion>> = HashMap::new();
+    for t in targets {
+        intervals.entry(t.name.as_str()).or_insert_with(|| {
+            order.push(t.name.clone());
+            Vec::new()
+        }).push(t);
+    }
+    let mut out = Vec::with_capacity(order.len());
+    for (i, gene) in order.iter().enumerate() {
+        eprint!("\r  Counting reads {}/{}: {}...", i + 1, order.len(), gene);
+        std::io::stderr().flush().ok();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut anonymous = 0u64;
+        let mut length = 0u64;
+        for t in &intervals[gene.as_str()] {
+            length += (t.end - t.start) as u64;
+            let chrom = bam.contig_mapper.to_bam_name(&t.segment);
+            // 1-based region covering the 0-based interval; exact overlap is checked below
+            let region = format!("{}:{}-{}", chrom, t.start.max(1), t.end);
+            let query = match bam.query(&region) {
+                Ok(q) => q,
+                Err(e) => {
+                    warn!("Target read counts: skipping {} interval {} ({})", gene, region, e);
+                    continue;
+                }
+            };
+            for rec in query {
+                let rec = rec?;
+                if !is_primary(&rec) || !has_aligned_base_in(&rec, t.start, t.end) {
+                    continue;
+                }
+                match rec.name() {
+                    Some(n) => {
+                        seen.insert(n.to_string());
+                    }
+                    None => anonymous += 1,
+                }
+            }
+        }
+        out.push((gene.clone(), GeneReadCount { reads: seen.len() as u64 + anonymous, length }));
+    }
+    eprintln!("\r  Target read counts done ({} genes).          ", order.len());
+    Ok(out)
+}
+
+/// Writes `{prefix}.target_counts.tsv` (columns `gene`, `target_len`, `reads`).
+pub fn write_target_counts(path: &str, rows: &[(String, GeneReadCount)]) -> std::io::Result<()> {
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(f, "gene\ttarget_len\treads")?;
+    for (gene, c) in rows {
+        writeln!(f, "{}\t{}\t{}", gene, c.length, c.reads)?;
+    }
+    Ok(())
 }
 
 /// Reads `{prefix}.target_counts.tsv` (columns `gene`, `target_len`, `reads`).

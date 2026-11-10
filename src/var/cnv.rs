@@ -457,6 +457,22 @@ pub fn call_cnvs(
             }
     }
     info!("Genes in diploid segments: {}", diploid_genes.len());
+    // Without diploid segments the baseline is every autosomal gene, including
+    // any on gained or lost arms: say so in the report
+    if karyotype.is_none() {
+        warn!("No karyotype available; focal CN baseline uses all autosomal genes.");
+        warnings.push(
+            "No karyotype available: the focal copy number baseline uses all autosomal genes, \
+             including any on gained or lost arms."
+                .to_string(),
+        );
+    } else if diploid_segments.is_empty() {
+        warn!("Karyotype has no diploid segments; focal CN baseline uses all autosomal genes.");
+        warnings.push(
+            "Karyotype has no diploid segments: the focal copy number baseline uses all autosomal genes."
+                .to_string(),
+        );
+    }
 
     // 1. Calculate Focal (Gene) Depths from BAM (or use precomputed)
     let focal_depths: HashMap<String, f64> = if let Some(fd) = precomputed_focal_depths {
@@ -587,13 +603,11 @@ pub fn call_cnvs(
     for g in cnv_genes {
         let mut gene_result = CnvGeneResult::default();
 
-        // Coverage focal CN: cn = (depth - med) / (med * 0.5 * br) + 2
+        // Coverage focal CN, used only when the NB is not fitted:
+        // cn = (depth - med) / (med * 0.5 * br) + 2
         let cov = focal_depths
             .get(g)
             .map(|&depth| (2.0 + 2.0 * (depth / median_focal - 1.0) / focal_br).max(0.0));
-        if let Some(cn) = cov {
-            gene_result.focal_coverage = Some(cn);
-        }
 
         let count = target_read_counts.as_ref().and_then(|c| c.get(g).copied());
         match (nb_fit, count) {
@@ -630,8 +644,10 @@ pub fn call_cnvs(
             }
         }
 
-        // Local CN - using raw bin depth and karyotype-based baseline
-        if let Some(bin_depth) = local_depths_raw.get(g) {
+        // Local CN - using raw bin depth and karyotype-based baseline. Like the
+        // coverage focal CN, only reported when the NB on read counts is not used.
+        if nb_fit.is_none()
+            && let Some(bin_depth) = local_depths_raw.get(g) {
             let cn = if let Some(br) = effective_blast_ratio {
                 // Blast ratio formula:
                 // expected_3n = br*3*covg_2n/2 + (1-br)*covg_2n

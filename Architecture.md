@@ -112,7 +112,7 @@ for each record:
 - `reads_on_target` counted once per read even if it overlaps multiple targets
 - `nt_on_target` sums across all overlapping targets
 - `focal_depths()` aggregates per-target bases by gene name (sum bases / sum lengths), properly handling multiple BED entries sharing the same gene name
-- Also counts, per gene, primary reads with >= 1 aligned base in the gene's targets (`target_read_counts()`, written to `{prefix}.target_counts.tsv`); these drive focal CN
+- Also counts, per gene, primary reads with >= 1 aligned base in the gene's targets (`target_read_counts()`, written to `{prefix}.target_counts.tsv`: columns `gene`, `target_len`, `reads`); these drive focal CN
 - Output: `PipelineQcData` for aggregate QC metrics, `HashMap<String, f64>` for per-gene depths (coverage fallback for focal CN; written to `target_coverage` in result JSON)
 
 ### 2. Builder Pattern (PipelineRunner)
@@ -423,11 +423,15 @@ Affine-gap Needleman-Wunsch global sequence aligner used by the breakpoint conse
 **File**: `src/var/cnv.rs`
 
 **Copy number estimation**:
-- Local CN: `gene_depth / genome_median_depth` (from coverage file)
-- Focal CN (`src/var/focal_nb.rs`), from per-gene read counts n_g (Pass 1 accumulator, or
-  `{prefix}.target_counts.tsv` for the standalone `cnv` command):
-  - Baseline genes: genes on CN-2 karyotype segments, not matching `exclude_from_baseline`
-    (without a karyotype: autosomal genes)
+- Local CN: `gene_depth / genome_median_depth` (from coverage file). Only computed when focal CN falls back
+  to coverage (the NB on read counts is not used).
+- Focal CN (`src/var/focal_nb.rs`), from per-gene read counts n_g. Full pipeline: the Pass 1 accumulator.
+  Standalone `cnv`: `--target-counts` if given, else `{prefix}.target_counts.tsv` if it exists, else reads
+  are counted from the BAM by region queries (`count_target_reads`, same rule: primary, >= 1 aligned base
+  in a gene interval, once per gene by read name) and saved to `{prefix}.target_counts.tsv`:
+  - Baseline genes: genes on CN-2 karyotype segments, not matching `exclude_from_baseline`.
+    Without a karyotype (standalone `cnv` without `--karyotype`, or a failed karyotype step) or with no
+    CN-2 segments: every autosomal gene not excluded, with a warning in `CnvOutput.warnings`
   - Fit `n_g ~ NB(mu_g, mu_g + alpha mu_g^2)`, `mu_g = r (L_g + l)` on the baseline genes by maximum
     likelihood (Nelder–Mead; l in 0–30 kb, alpha in 1e-6–1). L_g is the gene's target length. A focal gene
     that is itself a baseline gene is tested against a fit without it.
@@ -435,8 +439,7 @@ Affine-gap Needleman-Wunsch global sequence aligner used by the breakpoint conse
   - `focal_p_2n`: two-sided NB test of n_g under mu_g. `focal_flag` is set when round(focal) != 2 and
     `focal_p_2n >= 0.05`; the report shows the flag text without the p-value.
   - Fallback, with a warning: fewer than 20 baseline genes, a failed fit, or no read counts. Focal CN then
-    comes from coverage: `focal = 2 + 2 (depth / median baseline depth - 1) / br`. `focal_coverage` always
-    holds this coverage CN.
+    comes from coverage: `focal = 2 + 2 (depth / median baseline depth - 1) / br`.
 - `CnvOutput.notes` (shown as "Note:" under "Focal copy-number variation"): the blast percentage assumed.
   Below 50% it adds "Low blast percentage: verify against an independent blast estimate (e.g. flow
   cytometry) and rerun with --blast-ratio if needed." and the report shows the note in red.

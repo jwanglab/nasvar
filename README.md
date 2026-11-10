@@ -8,7 +8,7 @@ A variant calling pipeline for long-read sequencing with adaptive sampling, with
 - **Fusion breakpoint consensus** sequences via iterative template-based polishing
 - **Karyotype inference** at chromosome/arm level with GC bias correction
 - Targeted **SNV calling** in enriched regions
-- **CNV detection** in and around enriched regions, with GC bias correction and adjustment for inferred tumor fraction
+- **CNV detection** in and around enriched regions: focal CN from target read counts with a negative binomial test against 2n, adjusted for inferred tumor fraction; intragenic deletions/duplications
 - **ITD calling** (and other small indels)
 - **BAM, CRAM, and SAM support** with automatic format detection. Pass a `.txt` or `.list` file to transparently merge multiple alignment files. (Note: CRAM file processing will be much slower than BAM.)
 - **Adaptive sampling coverage** (`--as-alignments`): use a separate alignment file for coverage/karyotyping instead of the main BAM, for experiments with adaptive sampling decisions recorded in a separate file
@@ -56,13 +56,15 @@ nasvar pipeline \
 
 This produces:
 - `output/sample1.result.json` -- unified JSON with all variant calls, QC, and metadata
-- `output/sample1.coverage.tsv` -- binned read depth
-- `output/sample1.coverage.gc_adjusted.tsv` -- GC-bias corrected binned coverage
+- `output/sample1.report.md` / `output/sample1.report.html` -- report
+- `output/sample1.coverage.tsv` -- binned read depth, raw and GC-bias corrected
+- `output/sample1.target_counts.tsv` -- per-gene read counts over the panel targets (used for focal CN)
 - `output/sample1.maf` -- minor allele frequencies
 - `output/sample1.breakpoints.fa` -- fusion breakpoint consensus sequences (if fusions found and BAM is indexed)
-- `output/sample1.karyotype.gc_corrected.svg` -- karyotype coverage plot (GC-corrected)
-- `output/sample1.karyotype_baf.gc_corrected.svg` -- combined karyotype + BAF plot
-- `output/sample1.gc_vs_coverage.svg` -- GC bias diagnostic plot
+- `output/sample1.karyotype_baf.gc_corrected.svg` -- combined karyotype + BAF plot (without a MAF, `karyotype.gc_corrected.svg` instead)
+- `output/sample1.coverage_100k.bin`, `.slice.bam` (+ `.bai`), `.slice.fa.gz` (+ `.fai`), `.pipeline_config.json`, `.nasvar.zip` -- for the nasvar viewer
+
+With `--debug`, the pipeline also writes the diagnostic plots: `karyotype.svg` (before GC correction), `karyotype.gc_corrected.svg`, `gc_vs_coverage.svg`, `gc_vs_coverage.gc_corrected.svg`, and any focal-depth plots configured in the pipeline config.
 
 ### Required input files
 
@@ -108,8 +110,26 @@ Call copy number variants.
 
 ```
 nasvar cnv --bam <BAM> --targets <BED> --out-prefix <PREFIX> --config <JSON> --reference <JSON> \
-  [--ref-fasta <FASTA>] [--coverage <TSV>] [--blast-ratio <FLOAT>] [-f]
+  [--karyotype <JSON>] [--ref-fasta <FASTA>] [--coverage <TSV>] [--target-counts <TSV>] \
+  [--blast-ratio <FLOAT>] [-f]
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--karyotype <JSON>` | `result.json` with a karyotype, from `nasvar pipeline` or `nasvar karyotype`. Its 2n arms define the focal CN baseline genes, and its blast ratio is used unless `--blast-ratio` is given. Without it, the baseline is every autosomal gene (the report warns). The karyotype is copied into `<PREFIX>.cnv_result.json`. |
+| `--target-counts <TSV>` | Per-gene target read counts (`gene`, `target_len`, `reads`). Default: `<PREFIX>.target_counts.tsv` if it exists (written by `nasvar pipeline`); otherwise reads are counted from the BAM and saved there. |
+| `--coverage <TSV>` | Binned `coverage.tsv` for local CN (GC-corrected column used when present). Local CN is computed only when focal CN falls back to coverage, and reported for genes in `genes.cnv.local_cn_genes`. |
+| `--blast-ratio <FLOAT>` | Blast ratio (tumor fraction, 0-1); overrides the karyotype estimate. |
+
+`nasvar cnv` writes `<PREFIX>.cnv_result.json` with the CNV results (and the karyotype, if given), in the same format as `result.json`. It does not touch `<PREFIX>.result.json`, so it can be run on a pipeline output prefix.
+
+**Focal CN.** For each gene in `genes.cnv.focal_genes`:
+- Reads are counted per gene: primary alignments with at least one aligned base in the gene's targets, once per gene.
+- A negative binomial, `reads ~ NB(mu, mu + alpha mu^2)` with `mu = r (target length + l)`, is fitted to the baseline genes: genes on arms the karyotype calls 2n, not matching `genes.cnv.exclude_from_baseline`. Without a karyotype (or with no 2n arms), every autosomal gene not excluded is a baseline gene, and the report warns.
+- Focal CN = `2 + 2 (reads / mu - 1) / blast ratio`, clipped at 0. The blast ratio is 1 when none is provided or estimated.
+- p(2n) is the two-sided negative binomial test of the gene's count under 2n. When the rounded CN is not 2 but p(2n) >= 0.05, the report warns "Low confidence in this copy number change."
+- With fewer than 20 baseline genes, or if the fit fails, focal CN falls back to target coverage, with a warning.
+- The report states the blast percentage assumed: a note, in red below 50%, or a red warning when 100% is assumed for lack of an estimate.
 
 ### `nasvar fusions`
 
@@ -261,7 +281,7 @@ Unified JSON output containing all analysis results. Top-level fields (all optio
 | `qc` | On-target metrics and aligned read counts |
 | `fusions` | Fusion events with breakpoints, supporting reads, spike-in controls |
 | `karyotype` | Karyotype string, ISCN notation, per-arm copy numbers, warnings |
-| `cnv` | Per-gene CNV calls with local/focal CN, deletions, duplications |
+| `cnv` | Per-gene CNV calls: focal CN with NB p(2n) and read counts (local CN only in the coverage fallback), deletions, duplications; focal method, NB fit, notes and warnings |
 | `snv` | Per-gene SNV calls with CDS positions, amino acid changes, VAF |
 | `itd` | ITD calls with position, length, allelic ratio |
 | `breakpoint_consensus` | Consensus sequences over fusion breakpoints (when available) |
@@ -272,31 +292,35 @@ FASTA file with consensus sequences spanning each fusion breakpoint. Written whe
 
 ### `{prefix}.coverage.tsv`
 
-Tab-separated binned coverage: chromosome, start, end, read count, GC content.
+Tab-separated binned coverage: `chromosome`, `bin_start`, `bin_end`, `n_reads`, `gc_content`, `n_reads_gc_adj`. The GC-corrected column is filled during karyotype inference (`NA` otherwise).
 
-### `{prefix}.coverage.gc_adjusted.tsv`
+### `{prefix}.target_counts.tsv`
 
-GC-bias corrected binned coverage, produced during karyotype inference.
+Per-gene read counts over the panel targets, one row per gene in BED order: `gene`, `target_len` (summed length of the gene's BED intervals), `reads` (primary alignments with at least one aligned base in the gene's intervals, counted once per gene). Written by `nasvar pipeline`, or by `nasvar cnv` when it counts from the BAM. Used for focal CN.
 
 ### `{prefix}.maf`
 
 Tab-separated allele counts at specified sites: chromosome, position, ref count, alt count.
 
+### Files for the nasvar viewer
+
+`{prefix}.coverage_100k.bin`, `{prefix}.slice.bam` (+ `.bai`), `{prefix}.slice.fa.gz` (+ `.fai`), `{prefix}.pipeline_config.json` and `{prefix}.nasvar.zip` are written by `nasvar pipeline` for the nasvar viewer.
+
 ### `{prefix}.report.md` / `{prefix}.report.html`
 
-Report in Markdown and HTML formats, generated by `nasvar report`. Includes summary tables for fusions, karyotype, CNVs, SNVs, ITDs, and methodology details. The HTML report embeds karyotype SVG plots when available.
+Report in Markdown and HTML formats, written by `nasvar pipeline` (or regenerated from `result.json` with `nasvar report`). Includes summary tables for fusions, karyotype, CNVs, SNVs, ITDs, and methodology details. The HTML report embeds karyotype SVG plots when available.
 
 ### Karyotype plots
 
 Generated during karyotype inference (pipeline or standalone `karyotype` subcommand):
 
-| File | Content |
-|------|---------|
-| `{prefix}.karyotype.svg` | Coverage plot before GC correction |
-| `{prefix}.karyotype.gc_corrected.svg` | Coverage plot after GC correction |
-| `{prefix}.karyotype_baf.gc_corrected.svg` | Combined karyotype + B-allele frequency plot |
-| `{prefix}.gc_vs_coverage.svg` | GC content vs. coverage (diagnostic) |
-| `{prefix}.gc_vs_coverage.gc_corrected.svg` | GC content vs. coverage after correction |
+| File | Content | Written |
+|------|---------|---------|
+| `{prefix}.karyotype_baf.gc_corrected.svg` | Combined karyotype + B-allele frequency plot | Always, when a MAF is available |
+| `{prefix}.karyotype.gc_corrected.svg` | Coverage plot after GC correction | With `--debug`, or when there is no MAF (instead of the combined plot) |
+| `{prefix}.karyotype.svg` | Coverage plot before GC correction | With `--debug` |
+| `{prefix}.gc_vs_coverage.svg` | GC content vs. coverage (diagnostic) | With `--debug` |
+| `{prefix}.gc_vs_coverage.gc_corrected.svg` | GC content vs. coverage after correction | With `--debug` |
 
 ## Troubleshooting
 

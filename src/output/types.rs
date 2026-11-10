@@ -375,10 +375,6 @@ pub struct CnvGeneResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub focal_expected_reads: Option<f64>,
 
-    /// Coverage-based focal CN (the previous method), kept for comparison
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub focal_coverage: Option<f64>,
-
     /// Set when the rounded focal CN is not 2 but p(2n) >= 0.05 (shown in the
     /// report; the p-value itself is only in focal_p_2n)
     #[serde(skip_serializing_if = "Option::is_none")]
