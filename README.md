@@ -106,30 +106,13 @@ nasvar snv --bam <BAM> --fasta <FASTA> --gff <GFF> --out-prefix <PREFIX> --confi
 
 ### `nasvar cnv`
 
-Call copy number variants.
+Call copy number variants. Focal CN uses per-gene target read counts (`--target-counts`, or counted from the BAM) and a negative binomial test against 2n; the karyotype from `--karyotype` defines the diploid baseline. Writes `<PREFIX>.cnv_result.json`.
 
 ```
 nasvar cnv --bam <BAM> --targets <BED> --out-prefix <PREFIX> --config <JSON> --reference <JSON> \
-  [--karyotype <JSON>] [--ref-fasta <FASTA>] [--coverage <TSV>] [--target-counts <TSV>] \
-  [--blast-ratio <FLOAT>] [-f]
+  [--karyotype <JSON>] [--target-counts <TSV>] [--coverage <TSV>] [--blast-ratio <FLOAT>] \
+  [--ref-fasta <FASTA>] [-f]
 ```
-
-| Option | Description |
-|--------|-------------|
-| `--karyotype <JSON>` | `result.json` with a karyotype, from `nasvar pipeline` or `nasvar karyotype`. Its 2n arms define the focal CN baseline genes, and its blast ratio is used unless `--blast-ratio` is given. Without it, the baseline is every autosomal gene (the report warns). The karyotype is copied into `<PREFIX>.cnv_result.json`. |
-| `--target-counts <TSV>` | Per-gene target read counts (`gene`, `target_len`, `reads`). Default: `<PREFIX>.target_counts.tsv` if it exists (written by `nasvar pipeline`); otherwise reads are counted from the BAM and saved there. |
-| `--coverage <TSV>` | Binned `coverage.tsv` for local CN (GC-corrected column used when present). Local CN is computed only when focal CN falls back to coverage, and reported for genes in `genes.cnv.local_cn_genes`. |
-| `--blast-ratio <FLOAT>` | Blast ratio (tumor fraction, 0-1); overrides the karyotype estimate. |
-
-`nasvar cnv` writes `<PREFIX>.cnv_result.json` with the CNV results (and the karyotype, if given), in the same format as `result.json`. It does not touch `<PREFIX>.result.json`, so it can be run on a pipeline output prefix.
-
-**Focal CN.** For each gene in `genes.cnv.focal_genes`:
-- Reads are counted per gene: primary alignments with at least one aligned base in the gene's targets, once per gene.
-- A negative binomial, `reads ~ NB(mu, mu + alpha mu^2)` with `mu = r (target length + l)`, is fitted to the baseline genes: genes on arms the karyotype calls 2n, not matching `genes.cnv.exclude_from_baseline`. Without a karyotype (or with no 2n arms), every autosomal gene not excluded is a baseline gene, and the report warns.
-- Focal CN = `2 + 2 (reads / mu - 1) / blast ratio`, clipped at 0. The blast ratio is 1 when none is provided or estimated.
-- p(2n) is the two-sided negative binomial test of the gene's count under 2n. When the rounded CN is not 2 but p(2n) >= 0.05, the report warns "Low confidence in this copy number change."
-- With fewer than 20 baseline genes, or if the fit fails, focal CN falls back to target coverage, with a warning.
-- The report states the blast percentage assumed: a note, in red below 50%, or a red warning when 100% is assumed for lack of an estimate.
 
 ### `nasvar fusions`
 
