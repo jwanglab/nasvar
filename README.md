@@ -106,7 +106,7 @@ nasvar snv --bam <BAM> --fasta <FASTA> --gff <GFF> --out-prefix <PREFIX> --confi
 
 ### `nasvar cnv`
 
-Call copy number variants. Focal CN uses per-gene target read counts (`--target-counts`, or counted from the BAM) and a negative binomial test against 2n; the karyotype from `--karyotype` defines the diploid baseline. Writes `<PREFIX>.cnv_result.json`.
+Call copy number variants. Focal CN uses per-gene target read counts (`--target-counts`, or counted from the BAM) and a negative binomial test against 2n; the karyotype from `--karyotype` defines the diploid baseline. Writes `<PREFIX>.result.json` (with the karyotype, if given), which `nasvar report` can use; use a new prefix rather than a pipeline output prefix, whose `result.json` it would replace.
 
 ```
 nasvar cnv --bam <BAM> --targets <BED> --out-prefix <PREFIX> --config <JSON> --reference <JSON> \

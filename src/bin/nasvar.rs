@@ -111,7 +111,7 @@ enum Commands {
         /// BED file containing target regions (e.g., exons, capture targets).
         #[arg(long, required = true)]
         targets: String,
-        /// Prefix for output files (e.g., "results/sample1"): writes <prefix>.cnv_result.json, and
+        /// Prefix for output files (e.g., "results/sample1"): writes <prefix>.result.json, and
         /// <prefix>.target_counts.tsv when reads are counted from the BAM.
         #[arg(long, required = true)]
         out_prefix: String,
@@ -561,7 +561,7 @@ fn main() {
             config,
             reference,
         } => {
-            if let Err(e) = check_output_paths(out_prefix, &[".cnv_result.json"], *force) {
+            if let Err(e) = check_output_paths(out_prefix, &[".result.json"], *force) {
                 error!("{}", e);
                 return;
             }
@@ -683,7 +683,7 @@ fn main() {
                     if let Some(k) = karyo_data {
                         collector = collector.with_karyotype(k);
                     }
-                    let out_path = format!("{}.cnv_result.json", out_prefix);
+                    let out_path = format!("{}.result.json", out_prefix);
                     match collector.build().write_json(&out_path) {
                         Ok(()) => info!("Wrote {}", out_path),
                         Err(e) => error!("Error writing {}: {}", out_path, e),
